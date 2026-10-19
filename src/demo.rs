@@ -126,6 +126,10 @@ impl Sim {
         self.ops.perform_app(namespace, name, action)
     }
 
+    pub fn measure(&self, targets: &[crate::storage::Target]) -> crate::storage::Measurements {
+        crate::demo_ops::demo_measure(targets)
+    }
+
     pub fn step(&mut self) {
         self.ops.step();
         for v in self.load.values_mut() {
@@ -224,6 +228,7 @@ impl Sim {
             caps: crate::ops::Caps { argo_rollouts: true, gateway_api: true, cert_manager: true, argocd: true, metrics: true },
             apps: self.ops.apps(),
             metrics: Some(self.metrics()),
+            storage: crate::demo_ops::demo_storage(),
                     infra: Default::default(),
             helm: self.helm(),
             fetched_at: Instant::now(),

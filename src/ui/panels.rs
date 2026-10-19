@@ -276,10 +276,10 @@ pub fn footer(f: &mut Frame, area: Rect, app: &App) {
         ]
     };
     let keys: &[(&str, &str)] = if app.view.is_ops() {
-        &[("1-7/Tab", "view"), ("j/k", "select"), ("t", "tab"), ("⏎", "details"), ("Esc", "map"), ("c", "clusters"), ("r", "refresh"), ("q", "quit")]
+        &[("1-8/Tab", "view"), ("j/k", "select"), ("t", "tab"), ("⏎", "details"), ("Esc", "map"), ("c", "clusters"), ("r", "refresh"), ("q", "quit")]
     } else {
         &[
-            ("1-7/Tab", "view"),
+            ("1-8/Tab", "view"),
             ("j/k", "select"),
             ("⏎/→", "list·open"),
             ("t", "kind"),

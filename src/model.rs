@@ -205,6 +205,7 @@ pub struct Snapshot {
     /// Live usage from metrics-server; None when it is not installed.
     pub metrics: Option<crate::metrics::Metrics>,
     pub infra: crate::infra::Infra,
+    pub storage: crate::storage::StorageInfo,
     pub fetched_at: Instant,
     pub error: Option<String>,
 }
@@ -225,6 +226,7 @@ impl Snapshot {
             apps: vec![],
             metrics: None,
             infra: Default::default(),
+            storage: Default::default(),
             fetched_at: Instant::now(),
             error: None,
         }

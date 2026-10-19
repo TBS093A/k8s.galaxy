@@ -1328,6 +1328,7 @@ dependencies = [
  "clap",
  "flate2",
  "futures",
+ "http",
  "json-patch",
  "k8s-openapi",
  "kube",

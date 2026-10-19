@@ -11,6 +11,7 @@ mod metrics;
 mod model;
 mod ops;
 mod source;
+mod storage;
 mod ui;
 
 use std::path::PathBuf;
@@ -149,6 +150,7 @@ async fn main() -> Result<()> {
                     Msg::Switched { cluster } => app.switched(cluster),
                     Msg::SwitchFailed(e) => app.switch_failed(e),
                     Msg::Probed { index, result } => app.set_probe(index, result),
+                    Msg::Measured(res) => app.measured(res),
                 }
             }
             app.tick();

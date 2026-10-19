@@ -8,7 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::health_rgb;
-use crate::app::{App, NetTab, OpsRef, RbacTab, View};
+use crate::app::{App, NetTab, OpsRef, RbacTab, StoreTab, View};
+use crate::metrics::fmt_mem;
+use crate::storage::{Location, VolumeInfo};
 use crate::fx::{self, Rgb};
 use crate::model::Health;
 use crate::ops::{BindingInfo, NetInfo, Phase, RbacInfo, RolloutInfo, Rule, Subject};
@@ -45,6 +47,7 @@ fn accent(view: View) -> Rgb {
         View::Rollouts => fx::MAGENTA,
         View::Network => fx::CYAN,
         View::Argo => fx::GREEN,
+        View::Storage => (150, 120, 255),
         _ => fx::AMBER,
     }
 }
@@ -112,6 +115,7 @@ fn list(f: &mut Frame, area: Rect, app: &App) {
     let tabs: Vec<(&str, bool)> = match app.view {
         View::Network => NetTab::ALL.iter().map(|t| (t.short(), *t == app.net_tab)).collect(),
         View::Access => RbacTab::ALL.iter().map(|t| (t.short(), *t == app.rbac_tab)).collect(),
+        View::Storage => StoreTab::ALL.iter().map(|t| (t.short(), *t == app.store_tab)).collect(),
         _ => vec![],
     };
     for (name, on) in tabs {
@@ -129,6 +133,10 @@ fn list(f: &mut Frame, area: Rect, app: &App) {
             format!(" j/k select · R restart · p pause/resume · u undo · P promote · F full · A abort · Y retry{mode} ")
         }
         View::Network => " j/k select · t tab · ⏎ full details ".into(),
+        View::Storage => {
+            let mode = if app.read_only { "  READ-ONLY" } else if app.dry_run { "  DRY-RUN" } else { "" };
+            format!(" j/k select · t tab · m measure hostPath/local (du on nodes) · ⏎ details{mode} ")
+        }
         View::Argo => {
             let mode = if app.read_only { "  READ-ONLY" } else if app.dry_run { "  DRY-RUN" } else { "" };
             format!(" j/k select · s sync · S sync+prune · R refresh · H hard refresh · ⏎ details{mode} ")
@@ -172,6 +180,7 @@ fn empty_hint(app: &App) -> Vec<Line<'static>> {
     let caps = &app.snap.caps;
     let msg = match app.view {
         View::Rollouts => "no workloads yet".to_string(),
+        View::Storage => "no PersistentVolumes or claims in this cluster".into(),
         View::Argo if !caps.argocd => "Argo CD (applications.argoproj.io) is not installed in this cluster.".into(),
         View::Argo => "no Argo CD Applications".into(),
         View::Network => match app.net_tab {
@@ -218,8 +227,37 @@ fn summary(app: &App) -> Vec<Span<'static>> {
             }
             v
         }
+        View::Storage => {
+            let s = &app.snap.storage;
+            let total: i64 = s.volumes.iter().filter(|v| v.pv.is_some()).filter_map(|v| v.size()).sum();
+            let inside: i64 = s.volumes.iter().filter(|v| v.pv.is_some() && matches!(v.location, Location::InCluster(_))).filter_map(|v| v.size()).sum();
+            let used: i64 = s.volumes.iter().filter_map(|v| used_of(app, v).map(|u| u.0)).sum();
+            let known = s.volumes.iter().filter(|v| used_of(app, v).is_some()).count();
+            vec![
+                st(format!("  {} volumes · {} provisioned", s.volumes.len(), fmt_mem(total)), fx::STEEL),
+                st(format!("  in-cluster {}", fmt_mem(inside)), fx::GREEN),
+                st(format!("  external {}", fmt_mem(total - inside)), fx::CYAN),
+                st(format!("  used {} (known for {known})", fmt_mem(used)), fx::STEEL),
+            ]
+        }
         _ => vec![],
     }
+}
+
+fn location_rgb(l: &Location) -> Rgb {
+    match l {
+        Location::InCluster(_) => fx::GREEN,
+        Location::External(_) => fx::CYAN,
+        Location::Unknown => fx::STEEL,
+    }
+}
+
+/// Used / size of a volume: kubelet stats first, then a `du` measurement.
+fn used_of(app: &App, v: &VolumeInfo) -> Option<(i64, i64, &'static str)> {
+    if let Some(u) = v.usage {
+        return Some((u.used, if u.capacity > 0 { u.capacity } else { v.size().unwrap_or(0) }, "kubelet"));
+    }
+    app.measurement(v).map(|m| (m.used, v.size().unwrap_or(0), "du on the node"))
 }
 
 fn sync_rgb(sync: &str) -> Rgb {
@@ -351,6 +389,45 @@ fn row(app: &App, o: &OpsRef, t: f64) -> Line<'static> {
             let drift = a.drift().len();
             if drift > 0 {
                 s.push(st(format!("  drift {drift}"), fx::AMBER));
+            }
+            Line::from(s)
+        }
+        OpsRef::Volume(v) => {
+            let measured = app.measurement(v);
+            let mut s = vec![dot, st(format!("{:<11}", v.location.short()), location_rgb(&v.location)), st(pad(&v.name(), 30), TEXT), Span::raw(" ")];
+            match used_of(app, v) {
+                Some((used, size, _)) if size > 0 => {
+                    let frac = used as f64 / size as f64;
+                    let rgb = if frac >= 0.95 { fx::RED } else if frac >= 0.85 { fx::AMBER } else { fx::GREEN };
+                    s.extend(bar((used.min(size) >> 20) as i32, (size >> 20) as i32, 8, rgb, t, false));
+                    s.push(st(format!(" {:>7}/{:<7} ", fmt_mem(used), fmt_mem(size)), rgb));
+                }
+                _ => {
+                    s.extend(bar(0, 1, 8, fx::STEEL, t, false));
+                    s.push(st(format!(" {:>7}/{:<7} ", "?", v.size().map(fmt_mem).unwrap_or_else(|| "?".into())), fx::STEEL));
+                }
+            }
+            s.push(st(pad(v.location.what(), 34), fx::STEEL));
+            let phase = v.claim_phase.clone().or_else(|| v.pv_phase.clone()).unwrap_or_default();
+            if phase != "Bound" {
+                s.push(st(format!(" {phase}"), health_rgb(v.health(measured))));
+            } else if v.mounted_by.is_empty() && v.claim.is_some() {
+                s.push(st(" unmounted", fx::STEEL));
+            }
+            Line::from(s)
+        }
+        OpsRef::Class(c) => {
+            let n = app.snap.storage.volumes.iter().filter(|v| v.class == c.name).count();
+            let mut s = vec![
+                dot,
+                st(pad(&c.name, 22), TEXT),
+                st(format!("{:<11}", c.location.short()), location_rgb(&c.location)),
+                st(pad(&c.provisioner, 32), fx::STEEL),
+                st(format!("{:<7} {:<21} ", c.reclaim, c.binding), fx::STEEL),
+                st(format!("{n} volumes"), TEXT),
+            ];
+            if c.default {
+                s.push(st("  default", fx::CYAN));
             }
             Line::from(s)
         }
@@ -555,6 +632,25 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
         }
         OpsRef::Subject(s, bindings) => subject_detail(&app.snap.rbac, s, bindings),
         OpsRef::App(a) => app_detail(app, a),
+        OpsRef::Volume(v) => volume_detail(app, v, t),
+        OpsRef::Class(c) => {
+            let vols: Vec<_> = app.snap.storage.volumes.iter().filter(|v| v.class == c.name).collect();
+            let total: i64 = vols.iter().filter_map(|v| v.size()).sum();
+            let mut l = vec![
+                Line::from(vec![bold("StorageClass ", fx::CYAN), bold(c.name.clone(), TEXT), st(if c.default { "  (default)" } else { "" }, fx::CYAN)]),
+                kv("provisioner", c.provisioner.clone()),
+                Line::from(vec![st(format!("{:<10}", "where"), fx::STEEL), st(format!("{}: {}", c.location.short(), c.location.what()), location_rgb(&c.location))]),
+                kv("reclaim", c.reclaim.clone()),
+                kv("binding", c.binding.clone()),
+                kv("expand", if c.expansion { "allowed" } else { "not allowed" }),
+                Line::raw(""),
+                section(&format!("volumes ({}, {})", vols.len(), fmt_mem(total))),
+            ];
+            for v in vols {
+                l.push(Line::from(vec![st("  • ", health_rgb(v.health(app.measurement(v)))), st(format!("{}/{}", v.group(), v.name()), TEXT), st(format!("  {}", v.size().map(fmt_mem).unwrap_or_default()), fx::STEEL)]));
+            }
+            l
+        }
         OpsRef::Role(r) => {
             let rbac = &app.snap.rbac;
             let mut l = vec![
@@ -973,4 +1069,96 @@ fn rev_picker(f: &mut Frame, area: Rect, app: &App) {
         ),
         popup,
     );
+}
+
+fn volume_detail(app: &App, v: &VolumeInfo, t: f64) -> Vec<Line<'static>> {
+    let measured = app.measured.get(v.pv.as_deref().unwrap_or_default());
+    let title = match (&v.namespace, &v.claim, &v.pv) {
+        (Some(ns), Some(c), Some(pv)) => vec![bold("PVC ", fx::CYAN), bold(format!("{ns}/{c}"), TEXT), st(format!("  → PV {pv}"), fx::STEEL)],
+        (Some(ns), Some(c), None) => vec![bold("PVC ", fx::CYAN), bold(format!("{ns}/{c}"), TEXT), st("  → no volume yet", fx::RED)],
+        (_, _, Some(pv)) => vec![bold("PV ", fx::CYAN), bold(pv.clone(), TEXT), st("  (no claim)", fx::STEEL)],
+        _ => vec![],
+    };
+    let mut l = vec![Line::from(title)];
+    let phases = [v.claim_phase.as_ref().map(|p| format!("claim {p}")), v.pv_phase.as_ref().map(|p| format!("volume {p}"))];
+    l.push(kv("status", phases.into_iter().flatten().collect::<Vec<_>>().join(" · ")));
+    l.push(Line::from(vec![
+        st(format!("{:<10}", "where"), fx::STEEL),
+        bold(v.location.short().to_string(), location_rgb(&v.location)),
+        st(format!(": {}", v.location.what()), location_rgb(&v.location)),
+    ]));
+    let driver = if v.driver.is_empty() { String::new() } else { format!(" {}", v.driver) };
+    l.push(kv("backend", format!("{}{driver}", v.kind)));
+    if !v.detail.is_empty() {
+        l.push(kv(if v.kind == "csi" { "handle" } else { "path" }, v.detail.clone()));
+    }
+    l.push(kv("node", match (&v.node, v.mounted_by.first()) {
+        (Some(n), _) => format!("{n} (pinned by nodeAffinity)"),
+        (None, Some((_, n))) => format!("{n} (where it is mounted now)"),
+        _ => "—".into(),
+    }));
+    l.push(kv("size", format!(
+        "requested {} · capacity {}",
+        v.requested.map(fmt_mem).unwrap_or_else(|| "—".into()),
+        v.capacity.map(fmt_mem).unwrap_or_else(|| "—".into())
+    )));
+    match used_of(app, v) {
+        Some((used, size, source)) if size > 0 => {
+            let frac = used as f64 / size as f64;
+            let rgb = if frac >= 0.95 { fx::RED } else if frac >= 0.85 { fx::AMBER } else { fx::GREEN };
+            let mut s = vec![st(format!("{:<10}", "used"), fx::STEEL)];
+            s.extend(bar((used.min(size) >> 20) as i32, (size >> 20) as i32, 18, rgb, t, false));
+            s.push(st(format!(" {:.0}%  {} of {}", frac * 100.0, fmt_mem(used), fmt_mem(size)), rgb));
+            s.push(st(format!("  ({source})"), fx::STEEL));
+            l.push(Line::from(s));
+        }
+        _ if v.measurable() => l.push(Line::from(vec![
+            st(format!("{:<10}", "used"), fx::STEEL),
+            st("not reported by the kubelet for ", fx::STEEL),
+            st(v.kind.clone(), TEXT),
+            st(" — press m to measure on the node", fx::AMBER),
+        ])),
+        _ => l.push(kv("used", if v.pv.is_none() { "—" } else { "not reported (not mounted, or the driver has no volume stats)" })),
+    }
+    match measured {
+        Some(Ok(m)) => {
+            let pct = if m.fs_size > 0 { m.fs_used as f64 * 100.0 / m.fs_size as f64 } else { 0.0 };
+            l.push(Line::from(vec![
+                st(format!("{:<10}", "on disk"), fx::STEEL),
+                st(format!("{} — {} of {} used ({pct:.0}%)", m.device, fmt_mem(m.fs_used), fmt_mem(m.fs_size)), if pct > 85.0 { fx::AMBER } else { TEXT }),
+            ]));
+        }
+        Some(Err(e)) => l.push(Line::from(vec![st(format!("{:<10}", "measure"), fx::STEEL), st(e.clone(), fx::RED)])),
+        None => {
+            if matches!(v.kind.as_str(), "hostPath" | "local")
+                && let Some(n) = v.measure_node()
+                && let Some(fs) = app.snap.storage.node_fs.get(&n)
+            {
+                l.push(kv("node disk", format!("{} of {} used on {n} (kubelet; shared with everything else on the node)", fmt_mem(fs.used), fmt_mem(fs.capacity))));
+            }
+        }
+    }
+    l.push(kv("access", format!("{}  reclaim {}  class {}", v.access.join(","), if v.reclaim.is_empty() { "—" } else { &v.reclaim }, if v.class.is_empty() { "—" } else { &v.class })));
+    l.push(Line::raw(""));
+    l.push(section("mounted by"));
+    if v.mounted_by.is_empty() {
+        l.push(Line::from(st("  no pod mounts it", fx::STEEL)));
+    }
+    for (pod, node) in &v.mounted_by {
+        l.push(Line::from(vec![st(format!("  {pod}"), TEXT), st(format!("  on {node}"), fx::STEEL)]));
+    }
+    let problems = v.problems(app.measurement(v));
+    if !problems.is_empty() {
+        l.push(Line::raw(""));
+        l.push(section("notes"));
+        for (h, text) in problems {
+            let color = match h {
+                Health::Bad => fx::RED,
+                Health::Warn => fx::AMBER,
+                Health::Ok => fx::STEEL,
+            };
+            l.push(Line::from(vec![st(if h == Health::Ok { "  · " } else { "  ▲ " }, color), st(text, color)]));
+        }
+    }
+    l
 }

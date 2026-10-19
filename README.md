@@ -35,6 +35,7 @@ Live Hetzner cluster unless marked *demo* (`--demo`, for what that cluster does 
 | ![RBAC](docs/screenshots/rbac.png) **RBAC** — subjects rated by risk | ![Argo CD](docs/screenshots/argo.png) **Argo CD** — sync, health, drift, resources |
 | ![Rollback: pick a revision](docs/screenshots/rollback-picker.png) **Rollback** — pick any kept revision | ![Rollback confirmation](docs/screenshots/rollback-confirm.png) **Rollback warnings** — Argo CD self-heal would undo it |
 | ![StatefulSet rollback](docs/screenshots/rollback-statefulset.png) **StatefulSet rollback** — via ControllerRevisions | ![Metrics](docs/screenshots/demo-metrics.png) **Metrics** (*demo*) — load arcs, a node running hot |
+| ![Storage](docs/screenshots/storage.png) **Storage** — hostPath volumes pinned to nodes, Released ones flagged | ![Storage, measured](docs/screenshots/demo-storage.png) **Storage** (*demo*) — in-cluster vs external, measured usage |
 
 ## Run
 
@@ -157,6 +158,26 @@ The same notes stay visible in the rollout details. `--dry-run` sends them as se
 | `S` | sync with prune — deletes resources no longer in Git (asks first) |
 | `R` / `H` | refresh / hard refresh (`argocd.argoproj.io/refresh` annotation) |
 
+## Storage
+
+`8 STORAGE` lists every PersistentVolumeClaim by namespace, plus volumes nobody claims (`(no claim)`), and a
+`CLASSES` tab. For each volume:
+
+- **where the data lives** — *in-cluster*: node disks (`hostPath`, `local`, local-path, TopoLVM, DirectPV…) or a
+  storage system running in the cluster (Longhorn, Rook Ceph, OpenEBS, LINSTOR…); *external*: cloud block/file
+  storage (AWS EBS/EFS, GCE PD, Azure Disk/Files, Hetzner Cloud Volumes, DigitalOcean, Linode, Cinder, vSphere…),
+  NFS/SMB servers outside the cluster (an NFS server on a node counts as in-cluster), iSCSI, Fibre Channel;
+- the node it is pinned to, the backend (driver, path or volume handle), access modes, reclaim policy, the pods
+  mounting it;
+- **provisioned vs used** — used comes from the kubelet's volume stats (CSI and other drivers that report them).
+  The kubelet does not measure `hostPath`/`local` volumes: press `m` to measure them — one short-lived `busybox`
+  pod per node in `default`, the directories mounted read-only, `du` + `df`, deleted when done (asks first;
+  `--dry-run` only validates the pods). Their node's disk usage is shown meanwhile.
+
+Flagged (and sent to the warnings ticker): Pending claims, Lost/Failed volumes, Released volumes still holding
+data, `hostPath` volumes without node affinity (a pod moved to another node sees an empty directory), volumes
+≥ 85 % / 95 % full, a node filesystem filling up.
+
 ## Resource usage
 
 With metrics-server (`metrics.k8s.io`) installed: node CPU/memory bars in the details panel, per-pod usage in the pod list, load arcs around each star in the Galaxy (CPU inner, memory outer, green → amber → red) and planets sized by memory in use. Without it, the details panel shows **requests vs allocatable**, which every cluster has.
@@ -165,7 +186,7 @@ Traffic, RBAC and Helm refresh every 20 s in a background task (Helm release pay
 
 ## Keys
 
-`1-7`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `c` clusters · `r` refresh now · `q` quit
+`1-8`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `m` measure volumes (storage view) · `c` clusters · `r` refresh now · `q` quit
 
 ## Layout
 
@@ -182,13 +203,14 @@ src/
   infra.rs    managed / cloud VMs / bare metal / local detection, distributions
   kubeconfigs.rs  kubeconfig discovery in ~/.kube and $KUBECONFIG, cluster probes
   metrics.rs  metrics-server usage, quantity parsing
+  storage.rs  PV/PVC/StorageClass, in-cluster vs external, kubelet volume stats, du measurement
   ops.rs      rollouts, traffic (Ingress/Gateway API/cert-manager), RBAC, rollout actions
   demo_ops.rs simulated rollouts/traffic/RBAC for --demo
   fx.rs       colors, fades, pulses, noise — seed of a reusable `tui-fx`
   ui/         map, galaxy, radar, panels, ops (rollouts/net/rbac/argo views), cluster picker
 ```
 
-RBAC needed: `list` on nodes, pods, events, deployments, replicasets, daemonsets, statefulsets (cluster-wide), `get` on `pods/log`, `list` on secrets for the Helm tab (releases are read from `owner=helm` Secrets; without access the tab shows a warning and stays empty). The operations views add `list` on ingresses, services, endpointslices, roles, rolebindings, clusterroles, clusterrolebindings, serviceaccounts, Gateway API / cert-manager / Argo Rollouts objects, Argo CD `applications` (+ `patch` for sync/refresh), `nodes`/`pods` in `metrics.k8s.io`, and `patch` on the workloads (plus `rollouts/status`) for actions.
+RBAC needed: `list` on nodes, pods, events, deployments, replicasets, daemonsets, statefulsets (cluster-wide), `get` on `pods/log`, `list` on secrets for the Helm tab (releases are read from `owner=helm` Secrets; without access the tab shows a warning and stays empty). The operations views add `list` on ingresses, services, endpointslices, roles, rolebindings, clusterroles, clusterrolebindings, serviceaccounts, Gateway API / cert-manager / Argo Rollouts objects, Argo CD `applications` (+ `patch` for sync/refresh), `nodes`/`pods` in `metrics.k8s.io`, and `patch` on the workloads (plus `rollouts/status`) for actions. Storage needs `list` on persistentvolumes, persistentvolumeclaims, storageclasses, `get` on `nodes/proxy` (kubelet stats), and `create`/`delete` pods in `default` for measuring.
 
 ## Ideas / next
 

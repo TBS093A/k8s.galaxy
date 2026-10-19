@@ -668,3 +668,126 @@ fn demo_apps() -> Vec<DemoApp> {
     }
     list
 }
+
+use crate::storage::{ClassInfo, DiskUsage, Location, Measured, StorageInfo, Target, VolumeInfo};
+
+const GI: i64 = 1 << 30;
+
+#[allow(clippy::too_many_arguments)]
+fn vol(ns: Option<&str>, claim: Option<&str>, pv: Option<&str>, size: i64, class: &str, kind: &str, driver: &str, detail: &str, location: Location) -> VolumeInfo {
+    VolumeInfo {
+        namespace: ns.map(str::to_string),
+        claim: claim.map(str::to_string),
+        claim_phase: claim.map(|_| "Bound".into()),
+        requested: claim.map(|_| size * GI),
+        pv: pv.map(str::to_string),
+        pv_phase: pv.map(|_| "Bound".into()),
+        capacity: pv.map(|_| size * GI),
+        reclaim: "Delete".into(),
+        class: class.into(),
+        access: vec!["ReadWriteOnce".into()],
+        kind: kind.into(),
+        driver: driver.into(),
+        detail: detail.into(),
+        location,
+        node: None,
+        mounted_by: vec![],
+        usage: None,
+        released_from: None,
+    }
+}
+
+pub fn demo_storage() -> StorageInfo {
+    use Location::*;
+    let mut v = vec![];
+
+    let mut pg = vol(Some("shop"), Some("data-postgres-0"), Some("pvc-3f1c9a2e"), 50, "hcloud-volumes", "csi", "csi.hetzner.cloud", "104829331", External("Hetzner Cloud Volume".into()));
+    pg.mounted_by = vec![("shop/postgres-0".into(), "worker-fsn1-1".into())];
+    pg.usage = Some(DiskUsage { used: 41 * GI, capacity: 49 * GI });
+    v.push(pg);
+
+    let mut redis = vol(Some("shop"), Some("redis-data"), Some("pvc-77b0d1c4"), 5, "longhorn", "csi", "driver.longhorn.io", "pvc-77b0d1c4", InCluster("Longhorn".into()));
+    redis.mounted_by = vec![("shop/redis-master-0".into(), "worker-nbg1-1".into())];
+    redis.usage = Some(DiskUsage { used: 4 * GI + 900 * (1 << 20), capacity: 5 * GI });
+    v.push(redis);
+
+    let mut prom = vol(Some("monitoring"), Some("prometheus-db"), Some("pv-prometheus"), 100, "", "hostPath", "", "/data/prometheus", InCluster("node disk (hostPath) on homelab-waw-1".into()));
+    prom.node = Some("homelab-waw-1".into());
+    prom.reclaim = "Retain".into();
+    prom.mounted_by = vec![("monitoring/prometheus-0".into(), "homelab-waw-1".into())];
+    v.push(prom);
+
+    let mut loki = vol(Some("monitoring"), Some("loki-chunks"), Some("pvc-0be41f7a"), 30, "ebs-gp3", "csi", "ebs.csi.aws.com", "vol-0a3f9b7c21e4d5f60", External("AWS EBS".into()));
+    loki.mounted_by = vec![("monitoring/loki-0".into(), "edge-ash-1".into())];
+    loki.usage = Some(DiskUsage { used: 12 * GI, capacity: 30 * GI });
+    v.push(loki);
+
+    let mut qdrant = vol(Some("search"), Some("qdrant-storage"), Some("pvc-9d2a4e11"), 20, "rook-ceph-block", "csi", "rook-ceph.rbd.csi.ceph.com", "0001-0009-rook-ceph-0000000000000001-9d2a", InCluster("Rook Ceph".into()));
+    qdrant.mounted_by = vec![("search/qdrant-0".into(), "worker-hel1-1".into())];
+    qdrant.usage = Some(DiskUsage { used: 6 * GI, capacity: 20 * GI });
+    v.push(qdrant);
+
+    let mut media = vol(Some("catalog"), Some("media"), Some("pv-nas-media"), 200, "", "nfs", "", "192.168.1.20:/volume1/media", External("NFS 192.168.1.20".into()));
+    media.access = vec!["ReadWriteMany".into()];
+    media.reclaim = "Retain".into();
+    media.mounted_by = vec![("catalog/catalog-api-5080-0".into(), "homelab-waw-1".into()), ("catalog/catalog-api-5080-1".into(), "homelab-waw-2".into())];
+    media.usage = Some(DiskUsage { used: 140 * GI, capacity: 200 * GI });
+    v.push(media);
+
+    let mut cache = vol(Some("ci"), Some("docker-cache"), Some("pvc-5c1e8b90"), 80, "local-path", "hostPath", "rancher.io/local-path", "/opt/local-path-provisioner/pvc-5c1e8b90_ci_docker-cache", InCluster("local-path (node disk) on homelab-waw-2".into()));
+    cache.node = Some("homelab-waw-2".into());
+    cache.mounted_by = vec![("ci/docker-builder-a192-0".into(), "homelab-waw-2".into())];
+    v.push(cache);
+
+    let mut pending = vol(Some("shop"), Some("payments-export"), None, 20, "hcloud-volumes", "", "csi.hetzner.cloud", "", External("Hetzner Cloud Volume".into()));
+    pending.claim_phase = Some("Pending".into());
+    v.push(pending);
+
+    let mut idle = vol(Some("search"), Some("search-api-tmp"), Some("pvc-a14f02c3"), 2, "longhorn", "csi", "driver.longhorn.io", "pvc-a14f02c3", InCluster("Longhorn".into()));
+    idle.usage = None;
+    v.push(idle);
+
+    let mut released = vol(None, None, Some("pv-old-grafana"), 10, "", "hostPath", "", "/data/grafana", InCluster("node disk (hostPath) on worker-fsn1-1".into()));
+    released.node = Some("worker-fsn1-1".into());
+    released.pv_phase = Some("Released".into());
+    released.reclaim = "Retain".into();
+    released.released_from = Some("monitoring/grafana".into());
+    v.push(released);
+
+    let class = |name: &str, prov: &str, default: bool, location: Location| ClassInfo {
+        name: name.into(),
+        provisioner: prov.into(),
+        default,
+        reclaim: "Delete".into(),
+        binding: "WaitForFirstConsumer".into(),
+        expansion: true,
+        location,
+    };
+    let classes = vec![
+        class("hcloud-volumes", "csi.hetzner.cloud", true, External("Hetzner Cloud Volume".into())),
+        class("longhorn", "driver.longhorn.io", false, InCluster("Longhorn".into())),
+        class("local-path", "rancher.io/local-path", false, InCluster("local-path (node disk)".into())),
+        class("rook-ceph-block", "rook-ceph.rbd.csi.ceph.com", false, InCluster("Rook Ceph".into())),
+        class("ebs-gp3", "ebs.csi.aws.com", false, External("AWS EBS".into())),
+    ];
+    let node_fs = [("homelab-waw-1", 410, 480), ("homelab-waw-2", 120, 480), ("worker-fsn1-1", 31, 160), ("worker-nbg1-1", 22, 160), ("worker-hel1-1", 18, 160), ("cp-fsn1-1", 14, 80), ("edge-ash-1", 9, 80)]
+        .iter()
+        .map(|(n, u, c)| (n.to_string(), DiskUsage { used: u * GI, capacity: c * GI }))
+        .collect();
+    StorageInfo { volumes: v, classes, node_fs }
+}
+
+/// Simulated `du`/`df` on the node.
+pub fn demo_measure(targets: &[Target]) -> crate::storage::Measurements {
+    targets
+        .iter()
+        .map(|t| {
+            let res = match t.pv.as_str() {
+                "pv-prometheus" => Ok(Measured { used: 88 * GI, device: "/dev/nvme0n1p2".into(), fs_size: 480 * GI, fs_used: 410 * GI }),
+                "pv-old-grafana" => Ok(Measured { used: 3 * GI, device: "/dev/sda1".into(), fs_size: 160 * GI, fs_used: 31 * GI }),
+                _ => Ok(Measured { used: 23 * GI, device: "/dev/nvme0n1p2".into(), fs_size: 480 * GI, fs_used: 120 * GI }),
+            };
+            (t.pv.clone(), res)
+        })
+        .collect()
+}

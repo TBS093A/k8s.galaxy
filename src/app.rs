@@ -7,6 +7,8 @@ use crate::gitops::{AppAction, AppInfo};
 use crate::kubeconfigs::{ClusterEntry, Probe};
 use crate::source::Target;
 use crate::metrics::Usage;
+use crate::storage::{ClassInfo, Measured, Target as MeasureTarget, VolumeInfo};
+use std::collections::BTreeMap;
 use crate::ops::{Action, ActionKind, BindingInfo, CertInfo, GatewayInfo, IssuerInfo, RoleInfo, RolloutInfo, RouteInfo, Subject};
 use crate::model::{Health, HelmRelease, PodInfo, Snapshot, WorkloadInfo, WorkloadKind};
 use crate::source::Cmd;
@@ -20,10 +22,11 @@ pub enum View {
     Network,
     Access,
     Argo,
+    Storage,
 }
 
 impl View {
-    pub const ALL: [View; 7] = [View::Map, View::Galaxy, View::Radar, View::Rollouts, View::Network, View::Access, View::Argo];
+    pub const ALL: [View; 8] = [View::Map, View::Galaxy, View::Radar, View::Rollouts, View::Network, View::Access, View::Argo, View::Storage];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -34,12 +37,13 @@ impl View {
             View::Network => "NET",
             View::Access => "RBAC",
             View::Argo => "ARGO",
+            View::Storage => "STORAGE",
         }
     }
 
     /// Full-width operations views (no node sidebar).
     pub fn is_ops(self) -> bool {
-        matches!(self, View::Rollouts | View::Network | View::Access | View::Argo)
+        matches!(self, View::Rollouts | View::Network | View::Access | View::Argo | View::Storage)
     }
 
     fn ops_slot(self) -> usize {
@@ -47,6 +51,7 @@ impl View {
             View::Network => 1,
             View::Access => 2,
             View::Argo => 3,
+            View::Storage => 4,
             _ => 0,
         }
     }
@@ -69,6 +74,23 @@ impl NetTab {
             NetTab::Gateways => "GATEWAYS",
             NetTab::Certs => "CERTS",
             NetTab::Issuers => "ISSUERS",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StoreTab {
+    Volumes,
+    Classes,
+}
+
+impl StoreTab {
+    pub const ALL: [StoreTab; 2] = [StoreTab::Volumes, StoreTab::Classes];
+
+    pub fn short(self) -> &'static str {
+        match self {
+            StoreTab::Volumes => "VOLUMES",
+            StoreTab::Classes => "CLASSES",
         }
     }
 }
@@ -100,6 +122,8 @@ pub enum OpsRef<'a> {
     Subject(Subject, Vec<&'a BindingInfo>),
     Role(&'a RoleInfo),
     App(&'a AppInfo),
+    Volume(&'a VolumeInfo),
+    Class(&'a ClassInfo),
 }
 
 impl OpsRef<'_> {
@@ -118,6 +142,8 @@ impl OpsRef<'_> {
             },
             OpsRef::Role(r) => if r.cluster { "(cluster)".into() } else { r.namespace.clone() },
             OpsRef::App(a) => format!("project {}", a.project),
+            OpsRef::Volume(v) => v.group(),
+            OpsRef::Class(_) => "(cluster)".into(),
         }
     }
 
@@ -131,6 +157,8 @@ impl OpsRef<'_> {
             OpsRef::Subject(s, _) => s.name.clone(),
             OpsRef::Role(r) => r.name.clone(),
             OpsRef::App(a) => a.name.clone(),
+            OpsRef::Volume(v) => v.name(),
+            OpsRef::Class(c) => c.name.clone(),
         }
     }
 }
@@ -139,6 +167,7 @@ impl OpsRef<'_> {
 pub enum Pending {
     Rollout(Action),
     App { namespace: String, name: String, action: AppAction },
+    Measure(Vec<MeasureTarget>),
 }
 
 impl Pending {
@@ -147,6 +176,10 @@ impl Pending {
         match self {
             Pending::Rollout(a) => (a.kind.label().to_uppercase(), a.target.as_str(), format!("{}/{}", a.namespace, a.name)),
             Pending::App { namespace, name, action } => (action.label().to_uppercase(), "Application", format!("{namespace}/{name}")),
+            Pending::Measure(t) => {
+                let nodes: std::collections::BTreeSet<&str> = t.iter().map(|t| t.node.as_str()).collect();
+                ("MEASURE".into(), "volumes", format!("{} hostPath/local volume(s) on {} node(s)", t.len(), nodes.len()))
+            }
         }
     }
 
@@ -154,6 +187,7 @@ impl Pending {
         match self {
             Pending::Rollout(a) => matches!(a.kind, ActionKind::Abort | ActionKind::Undo | ActionKind::PromoteFull),
             Pending::App { action, .. } => *action == AppAction::SyncPrune,
+            Pending::Measure(_) => false,
         }
     }
 
@@ -161,6 +195,7 @@ impl Pending {
         match self {
             Pending::Rollout(a) => Cmd::Action(a.clone()),
             Pending::App { namespace, name, action } => Cmd::AppAction { namespace: namespace.clone(), name: name.clone(), action: *action },
+            Pending::Measure(t) => Cmd::Measure(t.clone()),
         }
     }
 }
@@ -318,9 +353,12 @@ pub struct App {
     pub res_idx: usize,
     pub res_kind: ResKind,
     /// Selected entry of each operations view (rollouts, network, access).
-    pub ops_idx: [usize; 4],
+    pub ops_idx: [usize; 5],
     pub net_tab: NetTab,
     pub rbac_tab: RbacTab,
+    pub store_tab: StoreTab,
+    /// Results of `m` (du on the node), by PV name.
+    pub measured: BTreeMap<String, Result<Measured, String>>,
     /// Show system:* subjects and roles in the RBAC view.
     pub show_system: bool,
     pub confirm: Option<Confirm>,
@@ -361,9 +399,11 @@ impl App {
             node_idx: 0,
             res_idx: 0,
             res_kind: ResKind::Pods,
-            ops_idx: [0; 4],
+            ops_idx: [0; 5],
             net_tab: NetTab::Routes,
             rbac_tab: RbacTab::Subjects,
+            store_tab: StoreTab::Volumes,
+            measured: BTreeMap::new(),
             show_system: false,
             confirm: None,
             rev_picker: None,
@@ -586,6 +626,10 @@ impl App {
                     .collect(),
             },
             View::Argo => self.snap.apps.iter().map(|a| (a.health(), OpsRef::App(a))).collect(),
+            View::Storage => match self.store_tab {
+                StoreTab::Volumes => self.snap.storage.volumes.iter().map(|v| (v.health(self.measurement(v)), OpsRef::Volume(v))).collect(),
+                StoreTab::Classes => self.snap.storage.classes.iter().map(|c| (Health::Ok, OpsRef::Class(c))).collect(),
+            },
             _ => vec![],
         };
         items.sort_by_key(|(h, o)| (o.group(), *h, o.name()));
@@ -606,6 +650,8 @@ impl App {
             }
             OpsRef::Role(r) => r.risk().map_or(Health::Ok, |(h, _)| h),
             OpsRef::App(a) => a.health(),
+            OpsRef::Volume(v) => v.health(self.measurement(v)),
+            OpsRef::Class(_) => Health::Ok,
         }
     }
 
@@ -658,7 +704,8 @@ impl App {
         self.fitted_once = false;
         self.node_idx = 0;
         self.res_idx = 0;
-        self.ops_idx = [0; 4];
+        self.ops_idx = [0; 5];
+        self.measured.clear();
         self.focus = Focus::Nodes;
         self.logs = None;
         self.confirm = None;
@@ -704,6 +751,58 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => self.picker = None,
             _ => {}
+        }
+    }
+
+    /// Successful `du` result for a volume, if it was measured.
+    pub fn measurement(&self, v: &VolumeInfo) -> Option<&Measured> {
+        self.measured.get(v.pv.as_deref()?)?.as_ref().ok()
+    }
+
+    /// `m`: measure every hostPath/local volume (one short-lived pod per node).
+    fn request_measure(&mut self) {
+        let targets: Vec<MeasureTarget> = self
+            .snap
+            .storage
+            .volumes
+            .iter()
+            .filter(|v| v.measurable())
+            .filter_map(|v| Some(MeasureTarget { pv: v.pv.clone()?, node: v.measure_node()?, path: v.detail.clone() }))
+            .collect();
+        if targets.is_empty() {
+            self.toast = Some(Toast { text: "nothing to measure: no hostPath/local volumes with a known node".into(), ok: false, at: Instant::now() });
+            return;
+        }
+        if self.read_only {
+            self.toast = Some(Toast { text: "read-only mode (--read-only): measuring creates pods, disabled".into(), ok: false, at: Instant::now() });
+            return;
+        }
+        let nodes: std::collections::BTreeSet<&str> = targets.iter().map(|t| t.node.as_str()).collect();
+        let warnings = vec![
+            (Health::Warn, format!("creates one short-lived pod per node ({}) in namespace default: busybox:1.36, the directories mounted read-only, deleted when done", nodes.into_iter().collect::<Vec<_>>().join(", "))),
+            (Health::Ok, "the kubelet does not report usage of hostPath/local volumes; du walks the directories (seconds, minutes on big ones)".into()),
+            (Health::Ok, "needs: create/delete pods in default, hostPath allowed there (Pod Security), busybox pullable by the nodes".into()),
+        ];
+        let explain = "du + df of each volume's directory on its node".to_string();
+        self.confirm = Some(Confirm { pending: Pending::Measure(targets), explain, warnings });
+    }
+
+    pub fn measured(&mut self, res: Result<crate::storage::Measurements, String>) {
+        match res {
+            Ok(list) if list.is_empty() => {
+                self.toast = Some(Toast { text: "dry-run OK: measuring pods validated by the API server".into(), ok: true, at: Instant::now() })
+            }
+            Ok(list) => {
+                let failed = list.iter().filter(|(_, r)| r.is_err()).count();
+                let first_err = list.iter().find_map(|(pv, r)| r.as_ref().err().map(|e| format!("{pv}: {e}")));
+                let n = list.len();
+                self.measured.extend(list);
+                self.toast = Some(match first_err {
+                    Some(e) => Toast { text: format!("measured {} of {n} volumes — {e}", n - failed), ok: false, at: Instant::now() },
+                    None => Toast { text: format!("measured {n} volumes"), ok: true, at: Instant::now() },
+                });
+            }
+            Err(e) => self.toast = Some(Toast { text: format!("measuring failed: {e}"), ok: false, at: Instant::now() }),
         }
     }
 
@@ -810,6 +909,10 @@ impl App {
                 let i = RbacTab::ALL.iter().position(|t| *t == self.rbac_tab).unwrap_or(0);
                 self.rbac_tab = RbacTab::ALL[rot(i, RbacTab::ALL.len())];
             }
+            View::Storage => {
+                let i = StoreTab::ALL.iter().position(|t| *t == self.store_tab).unwrap_or(0);
+                self.store_tab = StoreTab::ALL[rot(i, StoreTab::ALL.len())];
+            }
             _ => return,
         }
         self.ops_idx[self.view.ops_slot()] = 0;
@@ -892,6 +995,7 @@ impl App {
                 self.ops_idx[slot] = 0;
             }
             KeyCode::Char('/') if self.view == View::Access => self.query = Some(String::new()),
+            KeyCode::Char('m') if self.view == View::Storage => self.request_measure(),
             KeyCode::Char(c) if self.view == View::Argo => match AppAction::ALL.iter().find(|a| a.key() == c) {
                 Some(a) => self.request_app_action(*a),
                 None => return false,
@@ -1036,6 +1140,7 @@ impl App {
             KeyCode::Char('5') => self.view = View::Network,
             KeyCode::Char('6') => self.view = View::Access,
             KeyCode::Char('7') => self.view = View::Argo,
+            KeyCode::Char('8') => self.view = View::Storage,
             KeyCode::Tab => {
                 let i = View::ALL.iter().position(|v| *v == self.view).unwrap_or(0);
                 self.view = View::ALL[(i + 1) % View::ALL.len()];

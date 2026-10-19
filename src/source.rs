@@ -40,6 +40,7 @@ pub struct SlowState {
     net: NetInfo,
     rbac: RbacInfo,
     helm: Vec<HelmRelease>,
+    storage: crate::storage::StorageInfo,
     apps: Vec<AppInfo>,
     metrics: Option<Metrics>,
     /// Errors of the 20 s lane and of the 5 s lane (apps, metrics), kept apart so each lane replaces its own.
@@ -59,6 +60,8 @@ pub enum Cmd {
     Switch(Target),
     /// Probe these clusters (index in the app's list, entry).
     Probe(Vec<(usize, ClusterEntry)>),
+    /// `du`/`df` of hostPath/local volumes on their nodes.
+    Measure(Vec<crate::storage::Target>),
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +78,7 @@ pub enum Msg {
     Switched { cluster: String },
     SwitchFailed(String),
     Probed { index: usize, result: Result<Probe, String> },
+    Measured(Result<crate::storage::Measurements, String>),
 }
 
 /// Background task handle that stops the task when the source it belongs to is dropped.
@@ -246,6 +250,7 @@ impl Source {
                 warnings.splice(0..0, slow.errors.iter().cloned());
                 warnings.splice(0..0, slow.live_errors.iter().cloned());
                 warnings.splice(0..0, cert_warnings(&slow.net));
+                warnings.splice(0..0, volume_warnings(&slow.storage));
                 Ok(Snapshot {
                     cluster: cluster.clone(),
                     nodes: nodes.items.into_iter().map(node_info).collect(),
@@ -259,11 +264,20 @@ impl Source {
                     caps: slow.crds.caps(),
                     apps: slow.apps.clone(),
                     metrics: slow.metrics.clone(),
+                    storage: slow.storage.clone(),
                     infra: Default::default(),
                     fetched_at: Instant::now(),
                     error: None,
                 })
             }
+        }
+    }
+
+    async fn measure(&mut self, targets: &[crate::storage::Target]) -> Result<crate::storage::Measurements, String> {
+        match self {
+            Source::Idle => Err("no cluster selected".into()),
+            Source::Demo(sim) => Ok(sim.measure(targets)),
+            Source::Kube { client, dry_run, .. } => crate::storage::measure(client, targets, *dry_run).await.map_err(|e| format!("{e:#}")),
         }
     }
 
@@ -422,6 +436,12 @@ pub async fn run(
                                 let result = probe(&entry, &cfg, &resolver).await.map_err(|e| format!("{e:#}"));
                                 let _ = tx.send(Msg::Probed { index, result });
                             });
+                        }
+                    }
+                    Some(Cmd::Measure(targets)) => {
+                        let res = source.measure(&targets).await;
+                        if tx.send(Msg::Measured(res)).is_err() {
+                            return;
                         }
                     }
                     Some(Cmd::AppAction { namespace, name, action }) => {
@@ -654,10 +674,11 @@ async fn slow_loop(client: Client, shared: Shared, wake: Arc<Notify>) {
         // Slow lane: traffic, RBAC, Helm.
         if slow_at.is_none_or(|t| t.elapsed() >= SLOW_INTERVAL) {
             slow_at = Some(Instant::now());
-            let (net, rbac, helm) = tokio::join!(
+            let (net, rbac, helm, storage) = tokio::join!(
                 tokio::time::timeout(limit, ops::net(&client, &crds)),
                 tokio::time::timeout(limit, ops::rbac(&client)),
                 tokio::time::timeout(limit, helm_releases(&client, &mut helm_cache)),
+                tokio::time::timeout(limit, crate::storage::fetch(&client)),
             );
             let mut errors = vec![];
             let mut st = shared.lock().unwrap();
@@ -670,6 +691,11 @@ async fn slow_loop(client: Client, shared: Shared, wake: Arc<Notify>) {
                 Ok(Ok(r)) => st.rbac = r,
                 Ok(Err(e)) => errors.push(lane_error("OpsList", "rbac", format!("{e:#}"))),
                 Err(_) => errors.push(lane_error("OpsList", "rbac", "timed out after 90s".into())),
+            }
+            match storage {
+                Ok(Ok(s)) => st.storage = s,
+                Ok(Err(e)) => errors.push(lane_error("OpsList", "storage", format!("{e:#}"))),
+                Err(_) => errors.push(lane_error("OpsList", "storage", "timed out after 90s".into())),
             }
             match helm {
                 Ok(Ok(h)) => st.helm = h,
@@ -757,6 +783,26 @@ fn decode_release(raw: &[u8]) -> Option<serde_json::Value> {
         bytes
     };
     serde_json::from_slice(&json).ok()
+}
+
+/// Volumes that need attention, as ticker warnings (information-only notes are left out).
+fn volume_warnings(storage: &crate::storage::StorageInfo) -> Vec<EventInfo> {
+    storage
+        .volumes
+        .iter()
+        .filter_map(|v| {
+            let (h, msg) = v.problems(None).into_iter().next()?;
+            (h != crate::model::Health::Ok).then(|| EventInfo {
+                reason: "Volume".into(),
+                object: match (&v.namespace, &v.claim) {
+                    (Some(ns), Some(c)) => format!("pvc/{ns}/{c}"),
+                    _ => format!("pv/{}", v.pv.clone().unwrap_or_default()),
+                },
+                message: msg,
+                count: 1,
+            })
+        })
+        .collect()
 }
 
 /// Certificates that failed or are about to expire, as ticker warnings.
