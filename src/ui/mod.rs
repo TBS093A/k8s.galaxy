@@ -3,6 +3,7 @@ mod labels;
 mod map;
 pub mod ops;
 mod picker;
+mod storage_map;
 mod panels;
 mod radar;
 

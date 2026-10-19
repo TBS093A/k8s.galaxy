@@ -70,6 +70,14 @@ fn bar(done: i32, total: i32, width: usize, rgb: Rgb, t: f64, moving: bool) -> V
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App) {
+    // Storage gets its map above the list.
+    let area = if app.view == View::Storage {
+        let [map, rest] = Layout::vertical([Constraint::Percentage(46), Constraint::Fill(1)]).areas(area);
+        super::storage_map::draw(f, map, app);
+        rest
+    } else {
+        area
+    };
     let [list_area, detail_area] = Layout::horizontal([Constraint::Percentage(54), Constraint::Fill(1)]).areas(area);
     list(f, list_area, app);
     detail(f, detail_area, app);
@@ -244,7 +252,7 @@ fn summary(app: &App) -> Vec<Span<'static>> {
     }
 }
 
-fn location_rgb(l: &Location) -> Rgb {
+pub(super) fn location_rgb(l: &Location) -> Rgb {
     match l {
         Location::InCluster(_) => fx::GREEN,
         Location::External(_) => fx::CYAN,
@@ -253,7 +261,7 @@ fn location_rgb(l: &Location) -> Rgb {
 }
 
 /// Used / size of a volume: kubelet stats first, then a `du` measurement.
-fn used_of(app: &App, v: &VolumeInfo) -> Option<(i64, i64, &'static str)> {
+pub(super) fn used_of(app: &App, v: &VolumeInfo) -> Option<(i64, i64, &'static str)> {
     if let Some(u) = v.usage {
         return Some((u.used, if u.capacity > 0 { u.capacity } else { v.size().unwrap_or(0) }, "kubelet"));
     }

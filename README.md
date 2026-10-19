@@ -35,8 +35,8 @@ Live Hetzner cluster unless marked *demo* (`--demo`, for what that cluster does 
 | ![RBAC](docs/screenshots/rbac.png) **RBAC** — subjects rated by risk | ![Argo CD](docs/screenshots/argo.png) **Argo CD** — sync, health, drift, resources |
 | ![Rollback: pick a revision](docs/screenshots/rollback-picker.png) **Rollback** — pick any kept revision | ![Rollback confirmation](docs/screenshots/rollback-confirm.png) **Rollback warnings** — Argo CD self-heal would undo it |
 | ![StatefulSet rollback](docs/screenshots/rollback-statefulset.png) **StatefulSet rollback** — via ControllerRevisions | ![Metrics](docs/screenshots/demo-metrics.png) **Metrics** (*demo*) — load arcs, a node running hot |
-| ![Storage](docs/screenshots/storage.png) **Storage** — hostPath volumes pinned to nodes, Released ones flagged | ![Storage, measured](docs/screenshots/demo-storage.png) **Storage** (*demo*) — in-cluster vs external, measured usage |
-| ![Storage, measured on the nodes](docs/screenshots/storage-measured.png) **Storage, measured** — `m`: du on the nodes, a Released volume 20× over its size | |
+| ![Storage](docs/screenshots/storage.png) **Storage** — map of node disks, Released volumes flagged | ![Storage, measured](docs/screenshots/demo-storage.png) **Storage** (*demo*) — in-cluster pools and external services linked to nodes |
+| ![Storage, measured on the nodes](docs/screenshots/storage-measured.png) **Storage, measured** — `m`: du on the nodes, volumes filled by usage | |
 
 ## Run
 
@@ -161,7 +161,14 @@ The same notes stay visible in the rollout details. `--dry-run` sends them as se
 
 ## Storage
 
-`8 STORAGE` lists every PersistentVolumeClaim by namespace, plus volumes nobody claims (`(no claim)`), and a
+`8 STORAGE` opens with a **storage map**: every node is a disk platter with its disk usage as an arc (from the
+kubelet), the volumes kept on its disk orbit it as planets — sized by capacity, filled by usage. Storage that is
+not on a node's own disk is drawn as blocks on the right — distributed in-cluster pools (Longhorn, Rook Ceph…) and
+external services (NFS, cloud volumes…) — each volume linked, with packets flowing, to the nodes whose pods mount
+it. The title sums it up: node disks used/total, volumes provisioned/used, how much is external. The volume
+selected in the list below is highlighted on the map.
+
+Below the map, every PersistentVolumeClaim by namespace, plus volumes nobody claims (`(no claim)`), and a
 `CLASSES` tab. For each volume:
 
 - **where the data lives** — *in-cluster*: node disks (`hostPath`, `local`, local-path, TopoLVM, DirectPV…) or a
