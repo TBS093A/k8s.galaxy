@@ -33,7 +33,8 @@ Live Hetzner cluster unless marked *demo* (`--demo`, for what that cluster does 
 | ![Rollouts](docs/screenshots/rollouts.png) **Rollouts** — revisions of a Deployment | ![Argo Rollouts canary](docs/screenshots/demo-argo-rollouts.png) **Argo Rollouts canary** (*demo*) — steps, traffic split |
 | ![Routes](docs/screenshots/net-routes.png) **Routes** — host → service → endpoints, TLS chain | ![Certificates](docs/screenshots/net-certs.png) **Certificates** — expired cert with its failing ACME challenge |
 | ![RBAC](docs/screenshots/rbac.png) **RBAC** — subjects rated by risk | ![Argo CD](docs/screenshots/argo.png) **Argo CD** — sync, health, drift, resources |
-| ![Metrics](docs/screenshots/demo-metrics.png) **Metrics** (*demo*) — load arcs, a node running hot | |
+| ![Rollback: pick a revision](docs/screenshots/rollback-picker.png) **Rollback** — pick any kept revision | ![Rollback confirmation](docs/screenshots/rollback-confirm.png) **Rollback warnings** — Argo CD self-heal would undo it |
+| ![StatefulSet rollback](docs/screenshots/rollback-statefulset.png) **StatefulSet rollback** — via ControllerRevisions | ![Metrics](docs/screenshots/demo-metrics.png) **Metrics** (*demo*) — load arcs, a node running hot |
 
 ## Run
 
