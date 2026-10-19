@@ -25,8 +25,17 @@ pub fn header(f: &mut Frame, area: Rect, app: &App) {
     if snap.infra.hosting != crate::infra::Hosting::Unknown {
         spans.push(styled(format!("[{}] ", snap.infra.badge()), super::picker::hosting_rgb(&snap.infra)));
     }
-    if let Some(c) = &snap.costs {
-        spans.push(styled(format!("{}{:.0}/mo ", c.symbol(), c.monthly()), fx::AMBER));
+    // One total per currency (Hetzner bills in EUR, the others in USD).
+    let mut totals: Vec<(String, f64)> = vec![];
+    for c in &snap.costs {
+        match totals.iter_mut().find(|(s, _)| s == c.symbol()) {
+            Some((_, t)) => *t += c.monthly(),
+            None => totals.push((c.symbol().to_string(), c.monthly())),
+        }
+    }
+    if !totals.is_empty() {
+        let text = totals.iter().map(|(s, t)| format!("{s}{t:.0}")).collect::<Vec<_>>().join(" + ");
+        spans.push(styled(format!("{text}/mo "), fx::AMBER));
     }
     spans.push(Span::raw(" "));
     // Nine views do not fit next to a long cluster name on a narrow terminal: short labels then.
@@ -130,7 +139,12 @@ pub fn sidebar(f: &mut Frame, area: Rect, app: &App) {
                         .filter(|id| id.starts_with('#'))
                         .map(|id| id.trim_start_matches('#').to_string())
                         .or_else(|| n.provider_id.strip_prefix("hcloud://").map(str::to_string));
-                    let priced = id.as_deref().and_then(|id| Some((app.snap.costs.as_ref()?, app.snap.costs.as_ref()?.server(id)?)));
+                    // Hetzner servers match by id, AWS/GCP/Azure nodes by name.
+                    let priced = app
+                        .snap
+                        .costs
+                        .iter()
+                        .find_map(|c| id.as_deref().and_then(|id| c.server(id)).or_else(|| c.server(&n.name)).map(|s| (c, s)));
                     match (priced, &id) {
                         (Some((c, s)), _) => format!("{} {} · {}{:.3}/h", crate::infra::node_kind(n), s.detail, c.symbol(), s.hourly),
                         (None, Some(id)) => format!("{} #{id}", crate::infra::node_kind(n)),

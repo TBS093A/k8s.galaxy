@@ -294,7 +294,7 @@ impl Source {
                     apps: slow.apps.clone(),
                     metrics: slow.metrics.clone(),
                     storage: slow.storage.clone(),
-                    costs: None,
+                    costs: vec![],
                     cleanup: slow.cleanup.clone(),
                     infra: Default::default(),
                     fetched_at: Instant::now(),
@@ -396,8 +396,9 @@ pub async fn run(
     let mut instances: Vec<CloudInstance> = vec![];
     let mut cloud_errors: Vec<EventInfo> = vec![];
     let mut cloud_at: Option<Instant> = None;
-    let mut costs: Option<crate::costs::Costs> = None;
-    let mut cost_error: Option<EventInfo> = None;
+    // Pricing runs in its own task: CLI calls and price lists can take long, the view must not wait.
+    let cost_state: Arc<Mutex<(Vec<crate::costs::Costs>, Vec<EventInfo>)>> = Default::default();
+    let price_cache = Arc::new(tokio::sync::Mutex::new(crate::cloudprice::PriceCache::default()));
     loop {
         // Nothing to poll while no cluster is chosen: only serve commands (switch, probe).
         if !matches!(source, Source::Idle) {
@@ -417,25 +418,33 @@ pub async fn run(
                                 count: 1,
                             })
                             .collect();
-                        // Prices change rarely too: refresh with the inventory.
-                        if let Some(token) = &cloud_poll.config.hcloud_token {
-                            match crate::costs::hetzner(token).await {
-                                Ok(c) => (costs, cost_error) = (Some(c), None),
-                                Err(e) => {
-                                    cost_error = Some(EventInfo {
-                                        reason: "CloudAPI".into(),
-                                        object: "hetzner/costs".into(),
-                                        message: format!("{e:#}"),
-                                        count: 1,
-                                    })
-                                }
-                            }
+                        // Prices change rarely too: refresh with the inventory (not for the demo).
+                        // A run still in progress keeps the cache lock, so runs never overlap.
+                        if !matches!(source, Source::Demo(_))
+                            && let Ok(cache) = price_cache.clone().try_lock_owned()
+                        {
+                            let token = cloud_poll.config.hcloud_token.clone();
+                            let mut nodes = snap.nodes.clone();
+                            nodes.iter_mut().for_each(|n| resolver.apply(n, &instances));
+                            let hints: Vec<String> = snap.rbac.bindings.iter().filter(|b| b.cluster).map(|b| b.name.clone()).collect();
+                            let (server, version) = source.server_version();
+                            let infra = infra::classify(&server, &version, &nodes, &hints);
+                            let storage = snap.storage.clone();
+                            let state = cost_state.clone();
+                            tokio::spawn(async move {
+                                let mut cache = cache;
+                                let (costs, errors) = fetch_costs(token, &nodes, &storage, &infra, &mut cache).await;
+                                *state.lock().unwrap() = (costs, errors);
+                            });
                         }
                     }
                     snap.warnings.splice(0..0, cloud_errors.iter().cloned());
-                    snap.warnings.splice(0..0, cost_error.iter().cloned());
-                    if snap.costs.is_none() {
-                        snap.costs = costs.clone();
+                    {
+                        let (costs, errors) = &*cost_state.lock().unwrap();
+                        snap.warnings.splice(0..0, errors.iter().cloned());
+                        if snap.costs.is_empty() {
+                            snap.costs = costs.clone();
+                        }
                     }
                     snap.nodes.iter_mut().for_each(|n| resolver.apply(n, &instances));
                     snap.nodes.sort_by(|a, b| (&a.place, &a.name).cmp(&(&b.place, &b.name)));
@@ -479,7 +488,7 @@ pub async fn run(
                                 source = new;
                                 last_good = None;
                                 instances.clear();
-                                costs = None;
+                                *cost_state.lock().unwrap() = Default::default();
                                 cloud_errors.clear();
                                 cloud_at = None;
                                 if tx.send(Msg::Switched { cluster: source.cluster() }).is_err() {
@@ -541,6 +550,36 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Hetzner's bill from its API, AWS/GCP/Azure nodes priced from the providers' price lists.
+async fn fetch_costs(
+    token: Option<String>,
+    nodes: &[NodeInfo],
+    storage: &crate::storage::StorageInfo,
+    infra: &crate::infra::Infra,
+    cache: &mut crate::cloudprice::PriceCache,
+) -> (Vec<crate::costs::Costs>, Vec<EventInfo>) {
+    let mut costs = vec![];
+    let mut errors = vec![];
+    let error = |who: &str, e: String| EventInfo { reason: "CloudAPI".into(), object: format!("{who}/costs"), message: e, count: 1 };
+    if let Some(token) = token {
+        match crate::costs::hetzner(&token).await {
+            Ok(c) if !c.items.is_empty() => costs.push(c),
+            Ok(_) => {}
+            Err(e) => errors.push(error("hetzner", format!("{e:#}"))),
+        }
+    }
+    for (provider, res) in crate::cloudprice::costs(nodes, storage, infra, cache).await {
+        match res {
+            Ok(c) => {
+                errors.extend(c.notes.iter().map(|n| error(&provider.to_lowercase(), n.clone())));
+                costs.push(c);
+            }
+            Err(e) => errors.push(error(&provider.to_lowercase(), format!("{e:#}"))),
+        }
+    }
+    (costs, errors)
 }
 
 /// Reachability, version and hosting of one cluster. Nodes are matched against the cloud

@@ -1,6 +1,6 @@
-//! What the cluster costs on Hetzner Cloud: servers, volumes, snapshots, IPs and load balancers
-//! with list prices (gross) from the API, how long the servers have been up, and what stays
-//! billed when the cluster is powered down (snapshots).
+//! What the cluster costs. Hetzner Cloud: servers, volumes, snapshots, IPs and load balancers
+//! with list prices (gross) from its API, how long the servers have been up, and what stays
+//! billed with the servers deleted. AWS, GCP and Azure: see `cloudprice`.
 
 use std::time::Duration;
 
@@ -26,8 +26,12 @@ pub struct Item {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Costs {
+    /// "Hetzner Cloud", "AWS", "GCP", "Azure".
+    pub provider: String,
     pub currency: String,
     pub items: Vec<Item>,
+    /// What could not be priced (and why).
+    pub notes: Vec<String>,
 }
 
 impl Costs {
@@ -60,6 +64,7 @@ impl Costs {
             .sum()
     }
 
+    /// Hetzner servers match by server id, cloud nodes by node name.
     pub fn server(&self, id: &str) -> Option<&Item> {
         self.items.iter().find(|i| i.kind == "server" && i.id == id)
     }
@@ -245,7 +250,7 @@ pub fn parse(
             running: true,
         });
     }
-    Costs { currency: s(&pricing["currency"]), items }
+    Costs { provider: "Hetzner Cloud".into(), currency: s(&pricing["currency"]), items, notes: vec![] }
 }
 
 #[cfg(test)]

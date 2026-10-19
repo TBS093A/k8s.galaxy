@@ -191,11 +191,19 @@ data, `hostPath` volumes without node affinity (a pod moved to another node sees
 
 ## Costs
 
-With a Hetzner token (`--hcloud-env-file` / `HCLOUD_TOKEN`) the header shows what the cluster costs per month,
-each node's details show its server type and hourly price, and `$` opens the bill: servers, volumes, snapshots,
-primary and floating IPs and load balancers with gross list prices from the API, the total per month and hour,
-how long the servers have been up and what that has cost, and what stays billed with the servers deleted
-(snapshots, volumes, IPs).
+The header shows what the cluster costs per month, each node's details its instance type and hourly price, and
+`$` opens the bill — one section per provider (a hybrid cluster gets several; Hetzner bills in EUR, the others
+in USD):
+
+| Provider | What is priced | Prices from | Needs |
+| --- | --- | --- | --- |
+| Hetzner Cloud | servers, volumes, snapshots, primary/floating IPs, load balancers; uptime and cost since the servers were created; what stays billed with the servers deleted | Hetzner API (gross list prices) | `--hcloud-env-file` / `HCLOUD_TOKEN` |
+| AWS | nodes (instance type × region), EBS volumes of the PVs, the EKS control plane | Pricing API via the `aws` CLI | `pricing:GetProducts` |
+| GCP | nodes (machine type: vCPUs × core price + GiB × RAM price), PD volumes, the GKE fee | Cloud Billing Catalog API + `gcloud compute machine-types` | `gcloud` logged in |
+| Azure | nodes (VM size × region, Linux on-demand), managed disks by size tier | public Retail Prices API | nothing |
+
+On-demand list prices: spot, savings plans, committed use, traffic and support are not included. Prices are
+cached for 6 hours and fetched in the background, so a slow price list never holds up the view.
 
 ## Cleanup
 
@@ -237,7 +245,8 @@ src/
   infra.rs    managed / cloud VMs / bare metal / local detection, distributions
   kubeconfigs.rs  kubeconfig discovery in ~/.kube and $KUBECONFIG, cluster probes
   metrics.rs  metrics-server usage, quantity parsing
-  costs.rs    cloud bill (Hetzner API prices; AWS, GCP, Azure pricing)
+  costs.rs    Hetzner bill from its API
+  cloudprice.rs  AWS, GCP and Azure on-demand prices for nodes, volumes, control planes
   cleanup.rs  leftover detection and deletes
   watch.rs    watch streams + reflector caches for the live lists
   storage.rs  PV/PVC/StorageClass, in-cluster vs external, kubelet volume stats, du measurement

@@ -3,6 +3,7 @@
 mod app;
 mod cleanup;
 mod cloud;
+mod cloudprice;
 mod costs;
 #[cfg(test)]
 mod dast;

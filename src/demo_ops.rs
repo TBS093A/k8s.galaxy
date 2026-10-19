@@ -1416,7 +1416,7 @@ pub fn demo_cleanup() -> Vec<Finding> {
 }
 
 /// A Hetzner bill for the demo nodes (ids match their `hcloud://` providerIDs).
-pub fn demo_costs() -> crate::costs::Costs {
+pub fn demo_costs() -> Vec<crate::costs::Costs> {
     use crate::costs::{Costs, Item};
     let up: k8s_openapi::jiff::Timestamp =
         k8s_openapi::jiff::Timestamp::from_second(k8s_openapi::jiff::Timestamp::now().as_second() - 3 * 86_400 - 5 * 3600).unwrap();
@@ -1442,7 +1442,9 @@ pub fn demo_costs() -> crate::costs::Costs {
         created: None,
         running: true,
     };
-    Costs {
+    let hetzner = Costs {
+        provider: "Hetzner Cloud".into(),
+        notes: vec![],
         currency: "EUR".into(),
         items: vec![
             server("cp-fsn1-1", "cx32", "fsn1", 0.0112, 6.80),
@@ -1455,5 +1457,36 @@ pub fn demo_costs() -> crate::costs::Costs {
             other("floating ip", "public", "49.13.77.10", 3.57),
             other("load balancer", "public-gw", "lb11", 6.41),
         ],
-    }
+    };
+    // The edge node in Ashburn is an EC2 instance with an EBS volume.
+    let aws = Costs {
+        provider: "AWS".into(),
+        currency: "USD".into(),
+        notes: vec![],
+        items: vec![
+            Item {
+                kind: "server",
+                name: "edge-ash-1".into(),
+                detail: "m6i.large".into(),
+                location: "us-east-1".into(),
+                hourly: 0.096,
+                monthly: 0.096 * 730.0,
+                id: "edge-ash-1".into(),
+                created: None,
+                running: true,
+            },
+            Item {
+                kind: "volume",
+                name: "loki-chunks".into(),
+                detail: "32 GB ebs-gp3".into(),
+                location: "us-east-1".into(),
+                hourly: 0.0,
+                monthly: 32.0 * 0.08,
+                id: String::new(),
+                created: None,
+                running: true,
+            },
+        ],
+    };
+    vec![hetzner, aws]
 }

@@ -201,7 +201,7 @@ pub struct Snapshot {
     pub storage: crate::storage::StorageInfo,
     pub cleanup: Vec<crate::cleanup::Finding>,
     /// Hetzner Cloud bill, when a token is available.
-    pub costs: Option<crate::costs::Costs>,
+    pub costs: Vec<crate::costs::Costs>,
     pub fetched_at: Instant,
     pub error: Option<String>,
 }
@@ -224,7 +224,7 @@ impl Snapshot {
             infra: Default::default(),
             storage: Default::default(),
             cleanup: vec![],
-            costs: None,
+            costs: vec![],
             fetched_at: Instant::now(),
             error: None,
         }
