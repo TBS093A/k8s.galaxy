@@ -19,7 +19,7 @@ The resource list is split into namespace sections (with failing/degraded counts
 
 | Tab | Scope | `Enter` |
 | --- | --- | --- |
-| `POD` | pods on the selected node | logs |
+| `POD` | pods on the selected node | live logs (`e` shell, `P` port-forward) |
 | `DEP` `RS` `DS` `STS` | Deployments, ReplicaSets (scaled-to-0 ones hidden), DaemonSets, StatefulSets, cluster-wide, `ready/desired` | its pods with status, node, restarts |
 | `JOB` | Jobs cluster-wide: status, `succeeded/completions`, duration | completions, duration, the failure reason, its pods |
 | `CRON` | CronJobs: schedule, next run (in the CronJob's time zone) or suspended | schedule, next/last run, last success, problems, recent runs |
@@ -207,6 +207,23 @@ minutes), like `kubectl drain`. DaemonSet and static pods stay. The confirmation
 Cordoned nodes are marked `⊘` in the list. `--dry-run` validates the cordon and every eviction without
 changing anything; `--read-only` disables node actions.
 
+## Logs, shell, port-forward
+
+- **Logs** (`Enter`/`l` on a pod) follow the pod live, like `kubectl logs -f` (last 1000 lines, then new ones as
+  they come; 20 000 kept). Scrolling up pauses, `G` or `f` follows again. `/` filters (matches highlighted, `Esc`
+  clears), `c` switches the container, `p` shows the previous instance — the log of the container that crashed.
+- **Shell** (`e` on a pod, a workload — one of its ready pods — or in the log): the dashboard steps aside and
+  `kubectl exec -it` opens bash, or sh when the image has no bash, in the real terminal; `exit` comes back. It
+  uses the cluster's kubeconfig and context, so kubectl must be installed. Disabled by `--read-only`.
+- **Port-forward** (`P`): asks for `PORT`, `LOCAL:REMOTE` or `:REMOTE` (any free port), prefilled with the pod's
+  first declared port (8000 + port for ports below 1024, which need root). It tunnels through the API server's
+  WebSocket, like `kubectl port-forward`, listening on 127.0.0.1 only. `F` lists the forwards with their
+  connections and errors; `x` stops one. They last until stopped, the cluster is switched or the app quits.
+
+| | |
+| --- | --- |
+| ![Live logs](docs/screenshots/logs-live.png) **Live logs** (*demo*) — following, filtered by `warn` | ![Port-forwards](docs/screenshots/forwards.png) **Port-forwards** (*demo*) — two pods on localhost |
+
 ## Jobs and CronJobs
 
 The `JOB` and `CRON` tabs of the resource list show batch work. With a CronJob selected, `x` runs it now (a Job
@@ -256,7 +273,7 @@ watch streams into local caches: the API server sends only changes. Traffic, RBA
 
 ## Keys
 
-`1-9`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `C`/`D` cordon/drain node · `m` measure volumes (storage view) · `d` delete (cleanup view) · `c` clusters · `$` costs · `r` refresh now · `q` quit
+`1-9`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `e` shell in the pod · `P` port-forward · `F` port-forwards · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `C`/`D` cordon/drain node · `m` measure volumes (storage view) · `d` delete (cleanup view) · `c` clusters · `$` costs · `r` refresh now · `q` quit
 
 ## Layout
 

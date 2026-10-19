@@ -22,11 +22,11 @@ http = "1.5.0"
 jiff = "0.2"
 json-patch = "4"
 k8s-openapi = { version = "0.28.0", features = ["latest"] }
-kube = { version = "4.2.0", default-features = false, features = ["aws-lc-rs", "client", "rustls-tls", "jsonpatch", "runtime"] }
+kube = { version = "4.2.0", default-features = false, features = ["aws-lc-rs", "client", "rustls-tls", "jsonpatch", "runtime", "ws"] }
 ratatui = "0.30.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
 serde_json = "1.0.154"
-tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "time", "process", "net", "io-util"] }
 
 [profile.dev]
 debug = 0

@@ -61,6 +61,10 @@ pub fn header(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("{alerts:02}"), Style::new().fg(fx::c(alert_rgb)).add_modifier(Modifier::BOLD)),
         Span::raw("   "),
     ]);
+    if !app.forwards.is_empty() {
+        spans.push(Span::styled(format!("↔ {} FWD ", app.forwards.len()), Style::new().fg(fx::c(fx::CYAN)).add_modifier(Modifier::BOLD)));
+        spans.push(Span::raw("  "));
+    }
     if !app.synced {
         let dots = ".".repeat((t * 2.0) as usize % 4);
         let text = match (&app.switching, app.active) {
@@ -297,7 +301,7 @@ fn resources(f: &mut Frame, area: Rect, app: &App) {
         _ => "cluster".into(),
     };
     let enter = match app.res_kind {
-        ResKind::Pods => "logs",
+        ResKind::Pods => "logs · e shell · P forward",
         ResKind::Helm => "info",
         ResKind::Jobs => "info · d delete",
         ResKind::CronJobs => "info · x run · s suspend",
@@ -386,12 +390,14 @@ pub fn footer(f: &mut Frame, area: Rect, app: &App) {
             ("q", "quit"),
         ]
     };
-    let mut spans: Vec<Span> = keys.iter().flat_map(|(k, d)| key(k, d)).collect();
+    // A fresh toast goes first so a narrow terminal still shows it; the keys follow.
+    let mut spans: Vec<Span> = vec![];
     if let Some(toast) = app.toast.as_ref().filter(|t| t.at.elapsed().as_secs() < 8) {
         let rgb = if toast.ok { fx::GREEN } else { fx::RED };
         spans.push(Span::styled(format!(" {} ", if toast.ok { "✓" } else { "×" }), Style::new().fg(fx::c(fx::BG)).bg(fx::c(rgb))));
-        spans.push(styled(format!(" {}", toast.text), rgb));
+        spans.push(styled(format!(" {}   ", toast.text), rgb));
     }
+    spans.extend(keys.iter().flat_map(|(k, d)| key(k, d)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -400,15 +406,18 @@ pub fn logs(f: &mut Frame, area: Rect, app: &App) {
     let popup = centered(area, 90, 85);
     f.render_widget(Clear, popup);
     let height = popup.height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = if logs.loading {
+    let visible = logs.visible();
+    let filter = logs.live.as_ref().map(|l| l.filter.to_lowercase()).unwrap_or_default();
+    let mut lines: Vec<Line> = if logs.loading && logs.lines.is_empty() {
         vec![Line::from(styled("fetching logs…", fx::STEEL))]
     } else {
         let start = logs.scroll.saturating_sub(height.saturating_sub(1));
-        logs.lines
+        visible
             .iter()
             .skip(start)
             .take(height)
-            .map(|l| {
+            .map(|&i| {
+                let l = &logs.lines[i];
                 let lower = l.to_lowercase();
                 let bad = ["error", "panic", "fatal", "crashloop", "backoff", "oomkilled", "failed"];
                 let rgb = if bad.iter().any(|k| lower.contains(k)) {
@@ -418,13 +427,120 @@ pub fn logs(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     (170, 185, 195)
                 };
-                Line::from(styled(l.clone(), rgb))
+                highlight(l, &filter, rgb)
             })
             .collect()
     };
+    if let Some(live) = &logs.live
+        && let Some(reason) = &live.ended
+        && lines.len() < height
+    {
+        lines.push(Line::from(styled(format!("■ {reason}"), fx::STEEL)));
+    }
     let prefix = if logs.is_log { "LOGS " } else { "" };
-    let title = format!("{prefix}{}  [{}/{}]  j/k PgUp/PgDn g/G  Esc close", logs.title, logs.scroll + 1, logs.lines.len());
-    f.render_widget(Paragraph::new(lines).style(Style::new().bg(fx::c(fx::BG))).block(frame(&title, fx::GREEN, true)), popup);
+    let pos = format!("[{}/{}]", (logs.scroll + 1).min(visible.len()), visible.len());
+    let mut block = match &logs.live {
+        None => frame(&format!("{prefix}{}  {pos}  j/k PgUp/PgDn g/G  Esc close", logs.title), fx::GREEN, true),
+        Some(live) => {
+            let container = match (live.container(), live.containers.len()) {
+                (Some(c), n) if n > 1 => format!("  [{c} {}/{n}]", live.container + 1),
+                _ => String::new(),
+            };
+            let state = if live.previous {
+                "◂ previous instance"
+            } else if live.ended.is_some() {
+                "■ ended"
+            } else if live.follow {
+                "● following"
+            } else {
+                "‖ paused"
+            };
+            let filter = if live.filter.is_empty() { String::new() } else { format!("  /{}", live.filter) };
+            frame(&format!("{prefix}{}{container}  {state}{filter}  {pos}", logs.title), fx::GREEN, true).title_bottom(Line::from(styled(
+                " f follow · / filter · c container · p previous · e shell · P port-forward · g/G · Esc close ",
+                fx::STEEL,
+            )))
+        }
+    };
+    block = block.style(Style::new().bg(fx::c(fx::BG)));
+    f.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// A log line with the filter's matches inverted.
+fn highlight(line: &str, filter: &str, rgb: fx::Rgb) -> Line<'static> {
+    if filter.is_empty() {
+        return Line::from(styled(line.to_string(), rgb));
+    }
+    let lower = line.to_lowercase();
+    // Lowercasing can change byte lengths (rare); highlight only when it does not.
+    if lower.len() != line.len() {
+        return Line::from(styled(line.to_string(), rgb));
+    }
+    let mut spans = vec![];
+    let mut at = 0;
+    for (i, _) in lower.match_indices(filter) {
+        if i < at || !line.is_char_boundary(i) || !line.is_char_boundary(i + filter.len()) {
+            continue;
+        }
+        spans.push(styled(line[at..i].to_string(), rgb));
+        spans.push(Span::styled(line[i..i + filter.len()].to_string(), Style::new().fg(fx::c(fx::BG)).bg(fx::c(fx::AMBER))));
+        at = i + filter.len();
+    }
+    spans.push(styled(line[at..].to_string(), rgb));
+    Line::from(spans)
+}
+
+/// The one-line input (log filter, port-forward ports).
+pub fn prompt(f: &mut Frame, area: Rect, app: &App) {
+    let Some(p) = &app.prompt else { return };
+    let w = area.width.saturating_sub(4).min(90);
+    let rect = Rect { x: area.x + (area.width.saturating_sub(w)) / 2, y: area.y + area.height.saturating_sub(7) / 2, width: w, height: 4 };
+    f.render_widget(Clear, rect);
+    let lines = vec![
+        Line::from(vec![styled("› ", fx::CYAN), styled(p.text.clone(), (230, 240, 245)), styled("▏", fx::CYAN)]),
+        Line::from(styled(p.hint.clone(), fx::STEEL)),
+    ];
+    f.render_widget(Paragraph::new(lines).style(Style::new().bg(fx::c(fx::BG))).block(frame(&p.title, fx::CYAN, true)), rect);
+}
+
+/// Active port-forwards (`F`).
+pub fn forwards(f: &mut Frame, area: Rect, app: &App) {
+    let Some(sel) = app.forwards_open else { return };
+    let popup = centered(area, 70, 50);
+    f.render_widget(Clear, popup);
+    let mut lines = vec![];
+    if app.forwards.is_empty() {
+        lines.push(Line::from(styled("no port-forwards — P on a pod or workload in the list starts one", fx::STEEL)));
+    }
+    for (i, fw) in app.forwards.iter().enumerate() {
+        let st = &fw.state;
+        let (mark, rgb) = match (&st.local, &st.error) {
+            (None, Some(_)) => ("×", fx::RED),
+            (None, None) => ("◌", fx::AMBER),
+            (Some(_), Some(_)) => ("▲", fx::AMBER),
+            (Some(_), None) => ("●", fx::GREEN),
+        };
+        let local = match (st.local, &st.error) {
+            (Some(p), _) => format!("127.0.0.1:{p}"),
+            (None, Some(_)) => "failed".into(),
+            (None, None) => "binding…".into(),
+        };
+        let mut spans = vec![
+            styled(format!("{} {mark} ", if i == sel { "▶" } else { " " }), rgb),
+            styled(format!("{local:<16}"), (230, 240, 245)),
+            styled(" → ", fx::STEEL),
+            styled(format!("{}/{}:{}", fw.namespace, fw.pod, fw.remote), fx::CYAN),
+            styled(format!("   {} open · {} total", st.active, st.total), fx::STEEL),
+        ];
+        if let Some(e) = &st.error {
+            spans.push(styled(format!("   {e}"), rgb));
+        }
+        lines.push(Line::from(spans));
+    }
+    let block = frame(&format!("PORT-FORWARDS {}", app.forwards.len()), fx::CYAN, true)
+        .title_bottom(Line::from(styled(" j/k select · x stop · Esc close ", fx::STEEL)))
+        .style(Style::new().bg(fx::c(fx::BG)));
+    f.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 fn centered(area: Rect, pct_x: u16, pct_y: u16) -> Rect {

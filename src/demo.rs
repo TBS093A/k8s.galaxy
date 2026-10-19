@@ -118,6 +118,7 @@ impl Sim {
                     host_path: matches!(app, "prometheus" | "postgres" | "loki"),
                     empty_dir: matches!(app, "grafana" | "docker-builder"),
                     mirror: false,
+                    ports: vec![port_of(app)],
                 });
             }
         }
@@ -396,17 +397,34 @@ impl Sim {
         })
         .collect()
     }
+}
 
-    pub fn logs(&self, pod: &str) -> Vec<String> {
-        let mut rng = Rng::new(crate::fx::hash(pod));
-        let msgs = [
-            "INFO  request handled path=/api/v1/health status=200",
-            "INFO  connected to postgres pool=8",
-            "DEBUG cache hit ratio=0.93",
-            "WARN  slow query took=1.2s table=orders",
-            "INFO  reconciled 14 objects",
-            "ERROR upstream timeout service=search-api",
-        ];
-        (0..120).map(|i| format!("2026-10-19T12:{:02}:{:02}Z {}", i / 60, i % 60, rng.pick(&msgs))).collect()
+/// Line `i` of a demo pod's log.
+pub fn log_line(pod: &str, i: u64) -> String {
+    let msgs = [
+        "INFO  request handled path=/api/v1/health status=200",
+        "INFO  connected to postgres pool=8",
+        "DEBUG cache hit ratio=0.93",
+        "WARN  slow query took=1.2s table=orders",
+        "INFO  reconciled 14 objects",
+        "ERROR upstream timeout service=search-api",
+    ];
+    let h = crate::fx::hash(&format!("{pod}#{i}"));
+    format!("2026-10-19T12:{:02}:{:02}Z {}", (i / 60) % 60, i % 60, msgs[(h % msgs.len() as u64) as usize])
+}
+
+/// The port a demo app listens on.
+fn port_of(app: &str) -> i32 {
+    match app {
+        "postgres" => 5432,
+        "prometheus" => 9090,
+        "grafana" => 3000,
+        "loki" => 3100,
+        "qdrant" => 6333,
+        "node-exporter" => 9100,
+        "coredns" => 53,
+        "storefront" | "ingress-nginx" | "argocd-server" => 80,
+        "kube-proxy" | "cilium" => 9090,
+        _ => 8080,
     }
 }

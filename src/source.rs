@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::{Event, Node, Pod, PodSpec, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{ListParams, LogParams};
+use kube::api::ListParams;
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Api, Client, Config};
 use tokio::sync::Notify;
@@ -60,11 +60,12 @@ pub enum Cmd {
         name: String,
         action: AppAction,
     },
-    Logs {
-        namespace: String,
-        pod: String,
-        container: Option<String>,
-    },
+    /// Follow a pod's log (replaces the log followed before).
+    Logs(crate::live::LogReq),
+    StopLogs,
+    /// Start a port-forward; stop it by id.
+    Forward(crate::live::Forward),
+    StopForward(u64),
     /// Connect to another cluster (the current one is dropped).
     Switch(Target),
     /// Probe these clusters (index in the app's list, entry).
@@ -95,9 +96,18 @@ pub enum Target {
 pub enum Msg {
     Snapshot(Box<Snapshot>),
     ActionDone(Result<String, String>),
-    Logs {
-        title: String,
-        lines: Result<Vec<String>, String>,
+    /// New lines of the followed log `id`.
+    LogLines {
+        id: u64,
+        lines: Vec<String>,
+    },
+    LogEnd {
+        id: u64,
+        reason: String,
+    },
+    Forward {
+        id: u64,
+        state: crate::live::ForwardState,
     },
     /// Now showing this cluster (fresh state follows).
     Switched {
@@ -431,18 +441,6 @@ impl Source {
             }
         }
     }
-
-    async fn logs(&self, namespace: &str, pod: &str, container: Option<String>) -> Result<Vec<String>, String> {
-        match self {
-            Source::Idle => Err("no cluster selected".into()),
-            Source::Demo(sim) => Ok(sim.logs(pod)),
-            Source::Kube { client, .. } => {
-                let params = LogParams { tail_lines: Some(500), container, ..Default::default() };
-                let text = Api::<Pod>::namespaced(client.clone(), namespace).logs(pod, &params).await.map_err(|e| e.to_string())?;
-                Ok(text.lines().map(str::to_string).collect())
-            }
-        }
-    }
 }
 
 pub struct CloudPoll {
@@ -465,6 +463,9 @@ pub async fn run(
     // Pricing runs in its own task: CLI calls and price lists can take long, the view must not wait.
     let cost_state: Arc<Mutex<(Vec<crate::costs::Costs>, Vec<EventInfo>)>> = Default::default();
     let price_cache = Arc::new(tokio::sync::Mutex::new(crate::cloudprice::PriceCache::default()));
+    // Streams of the current cluster: the followed log and the port-forwards (by id).
+    let mut _log_task: Option<AbortOnDrop> = None;
+    let mut forwards: std::collections::BTreeMap<u64, AbortOnDrop> = Default::default();
     loop {
         // Nothing to poll while no cluster is chosen: only serve commands (switch, probe).
         if !matches!(source, Source::Idle) {
@@ -552,6 +553,8 @@ pub async fn run(
                             Ok(mut new) => {
                                 new.set_dry_run(dry_run);
                                 source = new;
+                                _log_task = None;
+                                forwards.clear();
                                 last_good = None;
                                 instances.clear();
                                 *cost_state.lock().unwrap() = Default::default();
@@ -639,13 +642,26 @@ pub async fn run(
                         }
                         break;
                     }
-                    Some(Cmd::Logs { namespace, pod, container }) => {
-                        let lines = source.logs(&namespace, &pod, container).await;
-                        let title = format!("{namespace}/{pod}");
-                        if tx.send(Msg::Logs { title, lines }).is_err() {
-                            return;
+                    Some(Cmd::Logs(req)) => {
+                        let tx = tx.clone();
+                        _log_task = match &source {
+                            Source::Kube { client, .. } => Some(AbortOnDrop(tokio::spawn(crate::live::follow_logs(client.clone(), req, tx)))),
+                            Source::Demo(_) => Some(AbortOnDrop(tokio::spawn(crate::live::demo_logs(req, tx)))),
+                            Source::Idle => None,
+                        };
+                    }
+                    Some(Cmd::StopLogs) => _log_task = None,
+                    Some(Cmd::Forward(f)) => {
+                        let client = match &source {
+                            Source::Kube { client, .. } => Some(client.clone()),
+                            _ => None,
+                        };
+                        if !matches!(source, Source::Idle) {
+                            let id = f.id;
+                            forwards.insert(id, AbortOnDrop(tokio::spawn(crate::live::forward(client, f, tx.clone()))));
                         }
                     }
+                    Some(Cmd::StopForward(id)) => drop(forwards.remove(&id)),
                 },
             }
         }
@@ -785,6 +801,7 @@ fn pod_info(pod: Pod) -> PodInfo {
         reason,
         restarts: statuses.iter().map(|c| c.restart_count).sum(),
         ready: !statuses.is_empty() && statuses.iter().all(|c| c.ready),
+        ports: spec.containers.iter().flat_map(|c| c.ports.iter().flatten().map(|p| p.container_port)).collect(),
         containers: spec.containers.into_iter().map(|c| c.name).collect(),
         owner,
         requests,

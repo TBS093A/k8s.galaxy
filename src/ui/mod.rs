@@ -41,6 +41,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.logs.is_some() {
         panels::logs(f, area, app);
     }
+    if app.forwards_open.is_some() {
+        panels::forwards(f, area, app);
+    }
     if app.costs_open {
         costs::draw(f, area, app);
     }
@@ -50,6 +53,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.picker.is_some() {
         picker::draw(f, area, app);
+    }
+    if app.prompt.is_some() {
+        panels::prompt(f, area, app);
     }
 }
 

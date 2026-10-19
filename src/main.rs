@@ -15,6 +15,7 @@ mod gitops;
 mod infra;
 mod jobs;
 mod kubeconfigs;
+mod live;
 mod metrics;
 mod model;
 mod nodeops;
@@ -106,7 +107,7 @@ async fn main() -> Result<()> {
         // A cluster from the list keeps its list name; anything else is opened as given.
         let source = match active {
             Active::Entry(i) => Source::open(&source::Target::Kube(clusters[i].clone())).await?,
-            _ => Source::connect(args.kubeconfig, args.context).await?,
+            _ => Source::connect(args.kubeconfig.clone(), args.context.clone()).await?,
         };
         (source, active, false)
     } else {
@@ -147,6 +148,7 @@ async fn main() -> Result<()> {
     if picker {
         app.open_picker();
     }
+    app.kube_args = (args.kubeconfig.clone(), args.context.clone());
     app.read_only = args.read_only;
     app.dry_run = args.dry_run;
     let mut terminal = ratatui::init();
@@ -156,7 +158,9 @@ async fn main() -> Result<()> {
             while let Ok(msg) = msg_rx.try_recv() {
                 match msg {
                     Msg::Snapshot(snap) => app.set_snapshot(*snap),
-                    Msg::Logs { title, lines } => app.set_logs(title, lines),
+                    Msg::LogLines { id, lines } => app.log_lines(id, lines),
+                    Msg::LogEnd { id, reason } => app.log_end(id, reason),
+                    Msg::Forward { id, state } => app.forward_state(id, state),
                     Msg::ActionDone(res) => app.action_done(res),
                     Msg::Switched { cluster } => app.switched(cluster),
                     Msg::SwitchFailed(e) => app.switch_failed(e),
@@ -171,6 +175,14 @@ async fn main() -> Result<()> {
                 && key.kind == KeyEventKind::Press
             {
                 app.on_key(key);
+            }
+            // A shell runs in the real terminal: suspend the UI around it.
+            if let Some(req) = app.take_exec() {
+                ratatui::restore();
+                let res = live::exec(&app.kubectl_args(), &req);
+                terminal = ratatui::init();
+                terminal.clear()?;
+                app.exec_done(res);
             }
         }
         Ok(())

@@ -12,6 +12,8 @@ under a dated heading, `## X.Y.Z - YYYY-MM-DD` (checked by the release workflow)
   cloud provider APIs (Hetzner, AWS, GCP, Azure).
 - Resource list by namespace: pods, Deployments, ReplicaSets, DaemonSets, StatefulSets, Jobs, CronJobs,
   Helm releases.
+- Live logs (follow, filter, container switch, previous instance), a shell in a pod (`kubectl exec`,
+  UI suspended) and port-forwards through the API server with a list of active forwards.
 - Jobs and CronJobs: status, duration, next run in the CronJob's time zone, missed/failed run warnings;
   run a CronJob now, suspend/resume it, delete a Job.
 - Rollouts view (native and Argo Rollouts) with restart, pause/resume, rollback to any revision

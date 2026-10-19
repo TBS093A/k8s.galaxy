@@ -434,6 +434,72 @@ pub struct LogView {
     pub loading: bool,
     /// Pod logs (vs an info popup): only logs get the LOGS prefix and auto-scroll to the end.
     pub is_log: bool,
+    /// A followed pod log (None for info popups).
+    pub live: Option<LiveLog>,
+}
+
+impl LogView {
+    pub fn info(title: String, lines: Vec<String>) -> Self {
+        LogView { title, lines, scroll: 0, loading: false, is_log: false, live: None }
+    }
+
+    /// Indexes of the lines shown: all, or those matching the filter (case-insensitive).
+    pub fn visible(&self) -> Vec<usize> {
+        match self.live.as_ref().map(|l| l.filter.to_lowercase()).filter(|f| !f.is_empty()) {
+            None => (0..self.lines.len()).collect(),
+            Some(f) => self.lines.iter().enumerate().filter(|(_, l)| l.to_lowercase().contains(&f)).map(|(i, _)| i).collect(),
+        }
+    }
+}
+
+pub struct LiveLog {
+    pub id: u64,
+    pub namespace: String,
+    pub pod: String,
+    pub containers: Vec<String>,
+    pub container: usize,
+    pub previous: bool,
+    /// Keep the view at the newest line.
+    pub follow: bool,
+    /// Why the stream stopped.
+    pub ended: Option<String>,
+    pub filter: String,
+}
+
+impl LiveLog {
+    pub fn container(&self) -> Option<&str> {
+        self.containers.get(self.container).map(String::as_str)
+    }
+}
+
+/// One line of text being typed: the log filter or a port-forward's ports.
+pub struct Prompt {
+    pub title: String,
+    pub hint: String,
+    pub text: String,
+    pub purpose: PromptFor,
+}
+
+pub enum PromptFor {
+    LogFilter,
+    Forward { namespace: String, pod: String },
+}
+
+/// A port-forward started from the UI and what it is doing.
+pub struct FwdView {
+    pub id: u64,
+    pub namespace: String,
+    pub pod: String,
+    pub remote: u16,
+    pub state: crate::live::ForwardState,
+}
+
+/// A shell to open in a pod (`kubectl exec`); main suspends the UI for it.
+#[derive(Clone, Debug)]
+pub struct ExecReq {
+    pub namespace: String,
+    pub pod: String,
+    pub container: Option<String>,
 }
 
 pub struct App {
@@ -475,6 +541,15 @@ pub struct App {
     /// Map canvas inner size (cols, rows) from the last frame, for fit-to-nodes.
     pub map_size: (u16, u16),
     pub logs: Option<LogView>,
+    pub prompt: Option<Prompt>,
+    pub forwards: Vec<FwdView>,
+    /// The forwards list (`F`) is open, with its cursor.
+    pub forwards_open: Option<usize>,
+    /// Shell requested; main runs it with the UI suspended.
+    pub exec: Option<ExecReq>,
+    /// --kubeconfig/--context given on the command line (for kubectl exec when not a listed cluster).
+    pub kube_args: (Option<std::path::PathBuf>, Option<String>),
+    next_id: u64,
     pub quit: bool,
     /// False until the first snapshot (good or failed) arrives.
     pub synced: bool,
@@ -514,6 +589,12 @@ impl App {
             cam_target: Camera::WORLD,
             map_size: (120, 40),
             logs: None,
+            prompt: None,
+            forwards: vec![],
+            forwards_open: None,
+            exec: None,
+            kube_args: (None, None),
+            next_id: 0,
             quit: false,
             synced: false,
             fitted_once: false,
@@ -567,12 +648,6 @@ impl App {
             self.fitted_once = true;
             self.fit();
         }
-    }
-
-    pub fn set_logs(&mut self, title: String, lines: Result<Vec<String>, String>) {
-        let lines = lines.unwrap_or_else(|e| vec![format!("error: {e}")]);
-        let scroll = lines.len().saturating_sub(1);
-        self.logs = Some(LogView { title, lines, scroll, loading: false, is_log: true });
     }
 
     pub fn selected_node(&self) -> Option<&crate::model::NodeInfo> {
@@ -845,6 +920,10 @@ impl App {
 
     /// The source switched clusters: start from a clean slate.
     pub fn switched(&mut self, cluster: String) {
+        // The source dropped the old cluster's streams.
+        self.forwards.clear();
+        self.forwards_open = None;
+        self.prompt = None;
         self.snap = Snapshot::empty(cluster.clone());
         self.synced = false;
         self.fitted_once = false;
@@ -1171,7 +1250,7 @@ impl App {
             let tag = if s.is_system() { "  [system]" } else { "" };
             lines.push(format!("{:<48} via {via}{tag}", s.label()));
         }
-        self.logs = Some(LogView { title: format!("who-can {q}"), lines, scroll: 0, loading: false, is_log: false });
+        self.logs = Some(LogView::info(format!("who-can {q}"), lines));
     }
 
     /// Key handling for the operations views; returns false when the key is not theirs.
@@ -1212,7 +1291,7 @@ impl App {
                         .into_iter()
                         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
                         .collect();
-                    self.logs = Some(LogView { title, lines, scroll: 0, loading: false, is_log: false });
+                    self.logs = Some(LogView::info(title, lines));
                 }
             }
             KeyCode::Char('s') if self.view == View::Access => {
@@ -1323,19 +1402,14 @@ impl App {
         if self.picker.is_some() {
             return self.picker_key(key);
         }
-        if let Some(logs) = &mut self.logs {
-            let page = 20;
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('l') => self.logs = None,
-                KeyCode::Down | KeyCode::Char('j') => logs.scroll = (logs.scroll + 1).min(logs.lines.len().saturating_sub(1)),
-                KeyCode::Up | KeyCode::Char('k') => logs.scroll = logs.scroll.saturating_sub(1),
-                KeyCode::PageDown => logs.scroll = (logs.scroll + page).min(logs.lines.len().saturating_sub(1)),
-                KeyCode::PageUp => logs.scroll = logs.scroll.saturating_sub(page),
-                KeyCode::Char('g') => logs.scroll = 0,
-                KeyCode::Char('G') => logs.scroll = logs.lines.len().saturating_sub(1),
-                _ => {}
-            }
-            return;
+        if self.prompt.is_some() {
+            return self.prompt_key(key);
+        }
+        if self.logs.is_some() {
+            return self.logs_key(key);
+        }
+        if self.forwards_open.is_some() {
+            return self.forwards_key(key);
         }
         if self.rev_picker.is_some() {
             return self.rev_picker_key(key);
@@ -1394,6 +1468,19 @@ impl App {
             KeyCode::Char('T') => self.cycle_kind(-1),
             KeyCode::Enter => self.open_selected(),
             KeyCode::Char('l') => self.open_logs(),
+            KeyCode::Char('e') if self.focus == Focus::Resources => {
+                if let Some(p) = self.target_pod() {
+                    let req = ExecReq { namespace: p.namespace.clone(), pod: p.name.clone(), container: p.containers.first().cloned() };
+                    self.request_exec(req);
+                }
+            }
+            KeyCode::Char('P') if self.focus == Focus::Resources => {
+                if let Some(p) = self.target_pod() {
+                    let (ns, pod) = (p.namespace.clone(), p.name.clone());
+                    self.request_forward(&ns, &pod);
+                }
+            }
+            KeyCode::Char('F') => self.forwards_open = Some(0),
             KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_by(1.6),
             KeyCode::Char('-') => self.zoom_by(1.0 / 1.6),
             KeyCode::Char('0') => self.cam_target = Camera::WORLD,
@@ -1516,14 +1603,318 @@ impl App {
             }
         };
         let (title, lines) = popup;
-        self.logs = Some(LogView { title, lines, scroll: 0, loading: false, is_log: false });
+        self.logs = Some(LogView::info(title, lines));
     }
 
     fn open_logs(&mut self) {
         let Some(pod) = self.selected_pod() else { return };
-        let cmd = Cmd::Logs { namespace: pod.namespace.clone(), pod: pod.name.clone(), container: pod.containers.first().cloned() };
+        let live = LiveLog {
+            id: 0,
+            namespace: pod.namespace.clone(),
+            pod: pod.name.clone(),
+            containers: pod.containers.clone(),
+            container: 0,
+            previous: false,
+            follow: true,
+            ended: None,
+            filter: String::new(),
+        };
         let title = format!("{}/{}", pod.namespace, pod.name);
-        let _ = self.cmds.send(cmd);
-        self.logs = Some(LogView { title, lines: vec![], scroll: 0, loading: true, is_log: true });
+        self.logs = Some(LogView { title, lines: vec![], scroll: 0, loading: true, is_log: true, live: Some(live) });
+        self.restart_log();
+    }
+
+    /// (Re)start the stream of the open log: new id, so lines of the previous stream are dropped.
+    fn restart_log(&mut self) {
+        self.next_id += 1;
+        let id = self.next_id;
+        let Some(view) = &mut self.logs else { return };
+        let Some(live) = &mut view.live else { return };
+        live.id = id;
+        live.ended = None;
+        view.lines.clear();
+        view.scroll = 0;
+        view.loading = true;
+        let req = crate::live::LogReq {
+            id,
+            namespace: live.namespace.clone(),
+            pod: live.pod.clone(),
+            container: live.container().map(str::to_string),
+            previous: live.previous,
+        };
+        let _ = self.cmds.send(Cmd::Logs(req));
+    }
+
+    fn close_logs(&mut self) {
+        if self.logs.take().is_some_and(|l| l.live.is_some()) {
+            let _ = self.cmds.send(Cmd::StopLogs);
+        }
+    }
+
+    pub fn log_lines(&mut self, id: u64, lines: Vec<String>) {
+        let Some(view) = &mut self.logs else { return };
+        let Some(live) = &view.live else { return };
+        if live.id != id {
+            return;
+        }
+        let follow = live.follow;
+        view.loading = false;
+        view.lines.extend(lines);
+        if view.lines.len() > crate::live::LOG_CAP {
+            let drop = view.lines.len() - crate::live::LOG_CAP;
+            view.lines.drain(..drop);
+            view.scroll = view.scroll.saturating_sub(drop);
+        }
+        if follow {
+            view.scroll = view.visible().len().saturating_sub(1);
+        }
+    }
+
+    pub fn log_end(&mut self, id: u64, reason: String) {
+        if let Some(view) = &mut self.logs
+            && let Some(live) = &mut view.live
+            && live.id == id
+        {
+            view.loading = false;
+            live.ended = Some(reason);
+        }
+    }
+
+    fn logs_key(&mut self, key: KeyEvent) {
+        let Some(view) = &mut self.logs else { return };
+        let page = 20;
+        let last = view.visible().len().saturating_sub(1);
+        // Moving up leaves follow mode; G (or f) goes back to it.
+        let unfollow = |v: &mut LogView| {
+            if let Some(l) = &mut v.live {
+                l.follow = false;
+            }
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('l') => {
+                if view.live.as_ref().is_some_and(|l| !l.filter.is_empty()) && key.code == KeyCode::Esc {
+                    if let Some(l) = &mut view.live {
+                        l.filter.clear();
+                    }
+                    view.scroll = view.visible().len().saturating_sub(1);
+                } else {
+                    self.close_logs();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => view.scroll = (view.scroll + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => {
+                view.scroll = view.scroll.saturating_sub(1);
+                unfollow(view);
+            }
+            KeyCode::PageDown => view.scroll = (view.scroll + page).min(last),
+            KeyCode::PageUp => {
+                view.scroll = view.scroll.saturating_sub(page);
+                unfollow(view);
+            }
+            KeyCode::Char('g') => {
+                view.scroll = 0;
+                unfollow(view);
+            }
+            KeyCode::Char('G') => {
+                view.scroll = last;
+                if let Some(l) = &mut view.live {
+                    l.follow = true;
+                }
+            }
+            _ => {
+                let Some(live) = &mut view.live else { return };
+                match key.code {
+                    KeyCode::Char('f') => {
+                        live.follow = !live.follow;
+                        if live.follow {
+                            view.scroll = last;
+                        }
+                    }
+                    KeyCode::Char('c') if live.containers.len() > 1 => {
+                        live.container = (live.container + 1) % live.containers.len();
+                        self.restart_log();
+                    }
+                    KeyCode::Char('p') => {
+                        live.previous = !live.previous;
+                        self.restart_log();
+                    }
+                    KeyCode::Char('/') => {
+                        let text = live.filter.clone();
+                        self.prompt = Some(Prompt {
+                            title: "filter log".into(),
+                            hint: "text to look for (case-insensitive) · Enter apply · Esc cancel".into(),
+                            text,
+                            purpose: PromptFor::LogFilter,
+                        });
+                    }
+                    KeyCode::Char('e') => {
+                        let req = ExecReq {
+                            namespace: live.namespace.clone(),
+                            pod: live.pod.clone(),
+                            container: live.container().map(str::to_string),
+                        };
+                        self.request_exec(req);
+                    }
+                    KeyCode::Char('P') => {
+                        let (ns, pod) = (live.namespace.clone(), live.pod.clone());
+                        self.request_forward(&ns, &pod);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn prompt_key(&mut self, key: KeyEvent) {
+        let Some(p) = &mut self.prompt else { return };
+        match key.code {
+            KeyCode::Esc => self.prompt = None,
+            KeyCode::Backspace => drop(p.text.pop()),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => p.text.push(c),
+            KeyCode::Enter => {
+                let Some(p) = self.prompt.take() else { return };
+                match p.purpose {
+                    PromptFor::LogFilter => {
+                        if let Some(view) = &mut self.logs {
+                            if let Some(l) = &mut view.live {
+                                l.filter = p.text.trim().to_string();
+                            }
+                            view.scroll = view.visible().len().saturating_sub(1);
+                        }
+                    }
+                    PromptFor::Forward { namespace, pod } => self.start_forward(namespace, pod, &p.text),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `e`: a shell in the pod, through kubectl with the UI suspended.
+    fn request_exec(&mut self, req: ExecReq) {
+        let refuse = if self.read_only {
+            Some("read-only mode (--read-only): no shell")
+        } else if matches!(self.active, Active::Demo) {
+            Some("a shell needs a real cluster (kubectl exec)")
+        } else {
+            None
+        };
+        match refuse {
+            Some(text) => self.toast = Some(Toast { text: text.into(), ok: false, at: Instant::now() }),
+            None => self.exec = Some(req),
+        }
+    }
+
+    pub fn take_exec(&mut self) -> Option<ExecReq> {
+        self.exec.take()
+    }
+
+    pub fn exec_done(&mut self, res: Result<String, String>) {
+        let ok = res.is_ok();
+        self.toast = Some(Toast { text: res.unwrap_or_else(|e| e), ok, at: Instant::now() });
+    }
+
+    /// kubectl options selecting the current cluster.
+    pub fn kubectl_args(&self) -> Vec<String> {
+        let (file, context) = match self.active {
+            Active::Entry(i) if i < self.clusters.len() => (Some(self.clusters[i].file.clone()), Some(self.clusters[i].context.clone())),
+            _ => self.kube_args.clone(),
+        };
+        let mut args = vec![];
+        if let Some(f) = file {
+            args.extend(["--kubeconfig".to_string(), f.display().to_string()]);
+        }
+        if let Some(c) = context {
+            args.extend(["--context".to_string(), c]);
+        }
+        args
+    }
+
+    /// The pod a port-forward or shell from the list goes to: the pod, or a ready pod of the workload.
+    fn target_pod(&self) -> Option<&PodInfo> {
+        match self.selected_res()? {
+            Res::Pod(p) => Some(p),
+            Res::Workload(w) => {
+                let pods = self.snap.pods_of(w);
+                pods.iter().find(|p| p.ready).or(pods.first()).copied()
+            }
+            Res::Job(j) => self.job_pods(&j.namespace, &j.name).into_iter().find(|p| p.phase == "Running"),
+            _ => None,
+        }
+    }
+
+    /// `P`: ask for the ports, prefilled with the first declared one.
+    fn request_forward(&mut self, ns: &str, pod: &str) {
+        let declared: Vec<i32> =
+            self.snap.pods.iter().find(|p| p.namespace == ns && p.name == pod).map(|p| p.ports.clone()).unwrap_or_default();
+        // Ports below 1024 need root locally: offer 8000 + port instead (80 → 8080).
+        let text = declared.first().map(|&p| if p < 1024 { format!("{}:{p}", p + 8000) } else { p.to_string() }).unwrap_or_default();
+        let ports = if declared.is_empty() {
+            "no ports declared".to_string()
+        } else {
+            format!("declared: {}", declared.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "))
+        };
+        self.prompt = Some(Prompt {
+            title: format!("port-forward {ns}/{pod}"),
+            hint: format!("PORT, LOCAL:REMOTE or :REMOTE (any free local port) · {ports}"),
+            text,
+            purpose: PromptFor::Forward { namespace: ns.into(), pod: pod.into() },
+        });
+    }
+
+    fn start_forward(&mut self, namespace: String, pod: String, text: &str) {
+        let (local, remote) = match crate::live::parse_ports(text) {
+            Ok(p) => p,
+            Err(e) => {
+                self.toast = Some(Toast { text: e, ok: false, at: Instant::now() });
+                return;
+            }
+        };
+        self.next_id += 1;
+        let id = self.next_id;
+        let f = crate::live::Forward { id, namespace: namespace.clone(), pod: pod.clone(), local, remote };
+        let _ = self.cmds.send(Cmd::Forward(f));
+        self.forwards.push(FwdView { id, namespace, pod, remote, state: Default::default() });
+    }
+
+    pub fn forward_state(&mut self, id: u64, state: crate::live::ForwardState) {
+        let Some(f) = self.forwards.iter_mut().find(|f| f.id == id) else { return };
+        if f.state.local.is_none()
+            && let Some(port) = state.local
+        {
+            self.toast = Some(Toast {
+                text: format!("forwarding 127.0.0.1:{port} → {}/{}:{}  (F lists forwards)", f.namespace, f.pod, f.remote),
+                ok: true,
+                at: Instant::now(),
+            });
+        }
+        if f.state.local.is_none() && state.local.is_none() && state.error.is_some() {
+            self.toast = Some(Toast {
+                text: format!("port-forward failed: {}", state.error.clone().unwrap_or_default()),
+                ok: false,
+                at: Instant::now(),
+            });
+        }
+        f.state = state;
+    }
+
+    fn forwards_key(&mut self, key: KeyEvent) {
+        let Some(i) = self.forwards_open else { return };
+        let n = self.forwards.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('F') => self.forwards_open = None,
+            KeyCode::Down | KeyCode::Char('j') if n > 0 => self.forwards_open = Some((i + 1).min(n - 1)),
+            KeyCode::Up | KeyCode::Char('k') => self.forwards_open = Some(i.saturating_sub(1)),
+            KeyCode::Char('x') | KeyCode::Char('d') | KeyCode::Delete if i < n => {
+                let f = self.forwards.remove(i);
+                let _ = self.cmds.send(Cmd::StopForward(f.id));
+                self.forwards_open = Some(i.min(self.forwards.len().saturating_sub(1)));
+                self.toast = Some(Toast {
+                    text: format!("stopped forward to {}/{}:{}", f.namespace, f.pod, f.remote),
+                    ok: true,
+                    at: Instant::now(),
+                });
+            }
+            _ => {}
+        }
     }
 }

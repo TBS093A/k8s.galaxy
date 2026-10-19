@@ -91,6 +91,8 @@ pub struct PodInfo {
     pub host_path: bool,
     pub empty_dir: bool,
     pub mirror: bool,
+    /// Declared container ports.
+    pub ports: Vec<i32>,
 }
 
 /// A PodDisruptionBudget: how many pods it lets go at the moment.

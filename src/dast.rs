@@ -58,9 +58,45 @@ fn popups_render_at_every_size() {
         scroll: 99,
         loading: false,
         is_log: true,
+        live: None,
     });
     render_all(&mut app);
+    // A followed log with a filter that matches across multibyte text, a long ended reason.
+    if let Some(l) = &mut app.logs {
+        l.live = Some(crate::app::LiveLog {
+            id: 1,
+            namespace: "n".repeat(80),
+            pod: "p".repeat(80),
+            containers: vec!["a".into(), "b".into()],
+            container: 1,
+            previous: false,
+            follow: true,
+            ended: Some("e".repeat(400)),
+            filter: "é".into(),
+        });
+    }
+    render_all(&mut app);
     app.logs = None;
+    app.prompt = Some(crate::app::Prompt {
+        title: "t".repeat(200),
+        hint: "h".repeat(300),
+        text: "é".repeat(200),
+        purpose: crate::app::PromptFor::LogFilter,
+    });
+    render_all(&mut app);
+    app.prompt = None;
+    app.forwards = (0..40)
+        .map(|i| crate::app::FwdView {
+            id: i,
+            namespace: "ns".into(),
+            pod: "pod".repeat(30),
+            remote: 8080,
+            state: crate::live::ForwardState { local: None, active: 0, total: 0, error: Some("x".repeat(300)) },
+        })
+        .collect();
+    app.forwards_open = Some(39);
+    render_all(&mut app);
+    app.forwards_open = None;
     app.confirm = Some(Confirm {
         pending: Pending::Measure(vec![]),
         explain: "y".repeat(400),
