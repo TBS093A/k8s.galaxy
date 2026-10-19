@@ -1,0 +1,19 @@
+# SCA, continuous: update pinned GitHub Actions and Cargo dependencies weekly.
+# Security updates for vulnerable dependencies are opened as soon as an advisory appears.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]

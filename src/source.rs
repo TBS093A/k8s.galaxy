@@ -752,7 +752,7 @@ async fn helm_releases(client: &Client, cache: &mut HelmPayloads) -> Result<Vec<
 }
 
 /// Release payload: base64 (inside the already-decoded Secret data) of gzipped JSON.
-fn decode_release(raw: &[u8]) -> Option<serde_json::Value> {
+pub(crate) fn decode_release(raw: &[u8]) -> Option<serde_json::Value> {
     use base64::Engine;
     use std::io::Read;
     let bytes = base64::engine::general_purpose::STANDARD.decode(raw).ok()?;

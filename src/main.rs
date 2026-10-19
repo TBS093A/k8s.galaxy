@@ -1,5 +1,9 @@
+#![forbid(unsafe_code)]
+
 mod app;
 mod cloud;
+#[cfg(test)]
+mod dast;
 mod demo;
 mod demo_ops;
 mod fx;

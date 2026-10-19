@@ -65,7 +65,7 @@ pub fn candidate_files() -> Vec<PathBuf> {
     files
 }
 
-fn stem(path: &Path) -> String {
+pub(crate) fn stem(path: &Path) -> String {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("kubeconfig");
     for ext in [".kubeconfig", ".config", ".conf", ".yaml", ".yml"] {
         if let Some(s) = name.strip_suffix(ext) {

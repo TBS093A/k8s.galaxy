@@ -1,0 +1,6 @@
+# zizmor (SAST for the workflows) configuration.
+rules:
+  self-repository:
+    # Reusable workflows are called as ./.github/workflows/x.yml, the documented form; the
+    # newer self-repository syntax is a style preference, not a security issue.
+    disable: true

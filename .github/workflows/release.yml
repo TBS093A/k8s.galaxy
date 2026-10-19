@@ -1,0 +1,158 @@
+# Release: pushing a tag vX.Y.Z publishes k8s-galaxy X.Y.Z.
+#
+# Gates, in order: tag format, tag on main, dated CHANGELOG entry, Cargo.toml version == tag,
+# the full CI and Security workflows, build + smoke test on every target, manual approval of
+# the "release" environment. Afterwards: GitHub release with binaries, checksums and build
+# provenance, crates.io (once enabled), and installing the published release on Linux and macOS.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: release checks
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: check
+        name: Tag format, tag on main, changelog entry, Cargo.toml version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?)$ ]]; then
+            echo "::error::tag '$TAG' is not vX.Y.Z (optionally -alpha.N, -beta.N, -rc.N)"; exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$TAG does not point to a commit on main"; exit 1
+          fi
+          if ! grep -Eq "^## ${version//./\\.} - [0-9]{4}-[0-9]{2}-[0-9]{2}" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md needs a section '## $version - YYYY-MM-DD'"; exit 1
+          fi
+          cargo_version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [[ "$cargo_version" != "$version" ]]; then
+            echo "::error::Cargo.toml says $cargo_version but the tag says $version"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: check
+    uses: ./.github/workflows/ci.yml
+
+  security:
+    needs: check
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+  build:
+    needs: check
+    uses: ./.github/workflows/build.yml
+
+  github-release:
+    name: GitHub release
+    needs: [check, ci, security, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: release # protected: requires a reviewer's approval (docs/RELEASING.md)
+      url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the provenance
+      attestations: write
+    steps:
+      - name: Built version matches the tag
+        env:
+          BUILT: ${{ needs.build.outputs.version }}
+          TAGGED: ${{ needs.check.outputs.version }}
+        run: |
+          if [[ "$BUILT" != "$TAGGED" ]]; then
+            echo "::error::built $BUILT but the tag says $TAGGED"; exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Create the release with notes from CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '$0 ~ "^## " {p = index($0, "## " v " ") == 1; next} p' CHANGELOG.md > notes.md
+          prerelease=""
+          [[ "$VERSION" == *-* ]] && prerelease="--prerelease"
+          gh release create "$TAG" dist/* --verify-tag $prerelease --title "k8s-galaxy $VERSION" --notes-file notes.md
+
+  publish-crates:
+    name: publish to crates.io
+    needs: [check, github-release]
+    # Enable with: gh variable set CRATES_PUBLISH --body true (needs the trusted publisher, docs/RELEASING.md)
+    if: vars.CRATES_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/k8s-galaxy/${{ needs.check.outputs.version }}
+    permissions:
+      id-token: write # trusted publishing (OIDC), no API token stored anywhere
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  verify-release:
+    name: verify the GitHub release (${{ matrix.target }})
+    needs: [check, github-release]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+    steps:
+      - name: Download the published archive, check its checksum and attestation, run it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          name="k8s-galaxy-$VERSION-$TARGET"
+          gh release download "$TAG" --repo "$REPO" --pattern "$name.tar.gz*"
+          shasum -a 256 -c "$name.tar.gz.sha256"
+          gh attestation verify "$name.tar.gz" --repo "$REPO"
+          tar -xzf "$name.tar.gz"
+          "$name/k8s-galaxy" --version | grep -qx "k8s-galaxy $VERSION"

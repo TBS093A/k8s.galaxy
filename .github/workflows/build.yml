@@ -1,0 +1,122 @@
+# Build release binaries and verify them before anything is published: the binary starts,
+# reports the right version, and the demo renders in a real terminal.
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      artifact-prefix:
+        description: prefix of the uploaded archives' artifact names
+        type: string
+        default: dist
+      all-targets:
+        description: every target (post-merge, release) or Linux x86_64 only (pull requests)
+        type: boolean
+        default: true
+      dev:
+        description: name archives as development builds (version-dev.<sha>)
+        type: boolean
+        default: false
+    outputs:
+      version:
+        description: version from Cargo.toml
+        value: ${{ jobs.meta.outputs.version }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  meta:
+    name: version and targets
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      label: ${{ steps.meta.outputs.label }}
+      matrix: ${{ steps.meta.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - id: meta
+        env:
+          ALL: ${{ inputs.all-targets }}
+          DEV: ${{ inputs.dev }}
+          SHA: ${{ github.sha }}
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          label="$version"
+          if [[ "$DEV" == "true" ]]; then label="$version-dev.${SHA::7}"; fi
+          linux='{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-latest"}'
+          if [[ "$ALL" == "true" ]]; then
+            matrix="[$linux,{\"target\":\"aarch64-unknown-linux-gnu\",\"os\":\"ubuntu-24.04-arm\"},{\"target\":\"aarch64-apple-darwin\",\"os\":\"macos-latest\"},{\"target\":\"x86_64-apple-darwin\",\"os\":\"macos-15-intel\"}]"
+          else
+            matrix="[$linux]"
+          fi
+          {
+            echo "version=$version"
+            echo "label=$label"
+            echo "matrix=$matrix"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building k8s-galaxy $label" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.meta.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Smoke test (version, help)
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          bin="target/$TARGET/release/k8s-galaxy"
+          "$bin" --version | tee /dev/stderr | grep -qx "k8s-galaxy $VERSION"
+          "$bin" --help > /dev/null
+      - name: Smoke test (demo renders in a real terminal for 5 s)
+        if: runner.os == 'Linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set +e
+          script -qec "stty cols 160 rows 48; timeout 5 target/$TARGET/release/k8s-galaxy --demo" /dev/null > /dev/null
+          status=$?
+          set -e
+          # 124 = still running when the timeout hit, i.e. it started and kept drawing.
+          [[ "$status" == "124" ]] || { echo "::error::demo exited with $status"; exit 1; }
+      - name: Archive
+        env:
+          TARGET: ${{ matrix.target }}
+          LABEL: ${{ needs.meta.outputs.label }}
+        run: |
+          name="k8s-galaxy-$LABEL-$TARGET"
+          mkdir "$name"
+          cp "target/$TARGET/release/k8s-galaxy" README.md LICENSE CHANGELOG.md "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ inputs.artifact-prefix }}-${{ matrix.target }}
+          path: k8s-galaxy-*.tar.gz*
+          if-no-files-found: error
+          retention-days: 30

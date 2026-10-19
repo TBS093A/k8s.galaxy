@@ -663,7 +663,7 @@ pub fn ago(t: Timestamp) -> String {
     }
 }
 
-fn days_until(rfc3339: &str) -> Option<i64> {
+pub(crate) fn days_until(rfc3339: &str) -> Option<i64> {
     let t: Timestamp = rfc3339.parse().ok()?;
     Some((t.as_second() - Timestamp::now().as_second()).div_euclid(86_400))
 }

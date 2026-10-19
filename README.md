@@ -1,5 +1,8 @@
 # k8s.galaxy
 
+[![CI](https://github.com/TBS093A/k8s.galaxy/actions/workflows/ci.yml/badge.svg)](https://github.com/TBS093A/k8s.galaxy/actions/workflows/ci.yml)
+[![Security](https://github.com/TBS093A/k8s.galaxy/actions/workflows/security.yml/badge.svg)](https://github.com/TBS093A/k8s.galaxy/actions/workflows/security.yml)
+
 Terminal command center for Kubernetes — Rust + Ratatui. Three live views of a cluster:
 
 | View | Key | What it shows |
@@ -219,6 +222,11 @@ src/
 ```
 
 RBAC needed: `list` on nodes, pods, events, deployments, replicasets, daemonsets, statefulsets (cluster-wide), `get` on `pods/log`, `list` on secrets for the Helm tab (releases are read from `owner=helm` Secrets; without access the tab shows a warning and stays empty). The operations views add `list` on ingresses, services, endpointslices, roles, rolebindings, clusterroles, clusterrolebindings, serviceaccounts, Gateway API / cert-manager / Argo Rollouts objects, Argo CD `applications` (+ `patch` for sync/refresh), `nodes`/`pods` in `metrics.k8s.io`, and `patch` on the workloads (plus `rollouts/status`) for actions. Storage needs `list` on persistentvolumes, persistentvolumeclaims, storageclasses, `get` on `nodes/proxy` (kubelet stats), and `create`/`delete` pods in `default` for measuring.
+
+## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) (pre-commit, tests, the deep DAST profile) and
+[docs/RELEASING.md](docs/RELEASING.md) (CI, Security, post-merge and release pipelines).
 
 ## Ideas / next
 

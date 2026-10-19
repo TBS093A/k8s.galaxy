@@ -1,1 +1,4 @@
 /target
+
+# Private words (domains, hosts, names) checked by the pre-commit hook; never commit this.
+.private-patterns

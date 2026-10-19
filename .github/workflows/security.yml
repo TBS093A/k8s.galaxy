@@ -1,0 +1,166 @@
+# Security quality gate: secrets, SAST, SCA and dynamic testing.
+# Required to merge (job "security-passed"); runs weekly too, so new advisories surface
+# without code changes; also called by the release workflow.
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1" # Mondays 05:17 UTC
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  GITLEAKS_VERSION: "8.30.1"
+  ZIZMOR_VERSION: "1.31.1"
+
+jobs:
+  secrets:
+    name: secrets (gitleaks, full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (checksum verified)
+        run: |
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfLO "$base/$archive"
+          curl -sSfL "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt" | grep " $archive\$" | sha256sum -c -
+          tar -xzf "$archive" gitleaks
+      - name: Scan every commit
+        run: ./gitleaks git --redact --verbose --exit-code 1 .
+
+  sast-codeql:
+    name: sast (CodeQL ${{ matrix.language }})
+    # Code scanning on a private repository needs GitHub Advanced Security: set the
+    # repository variable CODE_SCANNING=true once it is enabled (docs/RELEASING.md).
+    if: ${{ !github.event.repository.private || vars.CODE_SCANNING == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload results to the Security tab
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions] # "actions" checks the workflows themselves (injection, permissions)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        with:
+          category: /language:${{ matrix.language }}
+
+  sast-workflows:
+    name: sast (zizmor, GitHub Actions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: pip install "zizmor==${ZIZMOR_VERSION}"
+      - name: Audit the workflows (template injection, permissions, pinning, credentials)
+        run: zizmor --persona=regular --min-severity=low .github/workflows
+
+  sast-code:
+    name: sast (no unsafe, clippy with all lints)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: The crate forbids unsafe code
+        run: grep -q '^#!\[forbid(unsafe_code)\]' src/main.rs
+      - name: Clippy, warnings are errors
+        run: cargo clippy --locked --all-targets -- -D warnings -D clippy::dbg_macro -D clippy::todo -D clippy::unimplemented
+
+  sca:
+    name: sca (cargo-deny, cargo-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories bans licenses sources
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-audit
+      - name: RustSec advisories (yanked crates and unmaintained warnings included)
+        run: cargo audit --deny warnings
+
+  sca-dependency-review:
+    name: sca (dependency review)
+    if: ${{ github.event_name == 'pull_request' && (!github.event.repository.private || vars.CODE_SCANNING == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5
+        with:
+          fail-on-severity: moderate
+
+  dast:
+    name: dast (render fuzzing, hostile input, demo in a real terminal)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Every view at thousands of terminal sizes, parsers on random input (deep profile)
+        env:
+          DAST: "1"
+          PROPTEST_CASES: "20000"
+        run: cargo test --release --locked dast
+      - name: Demo under a pseudo-terminal at odd sizes
+        run: |
+          cargo build --release --locked
+          for size in "1 1" "20 5" "80 24" "300 100"; do
+            set -- $size
+            set +e
+            script -qec "stty cols $1 rows $2; timeout 3 target/release/k8s-galaxy --demo" /dev/null > /dev/null
+            status=$?
+            set -e
+            [[ "$status" == "124" ]] || { echo "::error::demo at ${1}x${2} exited with $status"; exit 1; }
+          done
+
+  security-passed:
+    name: security-passed
+    if: always()
+    needs: [secrets, sast-codeql, sast-workflows, sast-code, sca, sca-dependency-review, dast]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All security jobs succeeded (skipped = not applicable here)
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for result in $RESULTS; do
+            [[ "$result" == "success" || "$result" == "skipped" ]] || exit 1
+          done

@@ -606,7 +606,7 @@ async fn measure_node(api: &Api<Pod>, node: &str, list: &[&Target], dry_run: boo
     outcome
 }
 
-fn parse_measure(out: &str) -> BTreeMap<usize, Measured> {
+pub(crate) fn parse_measure(out: &str) -> BTreeMap<usize, Measured> {
     out.lines()
         .filter_map(|l| {
             let f: Vec<&str> = l.split_whitespace().collect();

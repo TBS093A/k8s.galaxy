@@ -2,6 +2,15 @@
 name = "k8s-galaxy"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
+description = "Terminal command center for Kubernetes: geo map, galaxy and radar views, rollouts, traffic, RBAC, Argo CD and storage"
+license = "MIT"
+repository = "https://github.com/TBS093A/k8s.galaxy"
+readme = "README.md"
+keywords = ["kubernetes", "tui", "dashboard", "ratatui", "devops"]
+categories = ["command-line-utilities", "visualization"]
+# Screenshots stay on GitHub; the published crate only needs the sources.
+exclude = ["docs/", ".github/", "scripts/"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -20,3 +29,6 @@ tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "
 
 [profile.dev]
 debug = 0
+
+[dev-dependencies]
+proptest = "1"
