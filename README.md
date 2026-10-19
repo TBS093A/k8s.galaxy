@@ -130,12 +130,19 @@ AWS/GCP are queried only when listed in `--cloud`.
 | --- | --- | --- |
 | `R` | restart (new pod template annotation / Argo `restartAt`) | all |
 | `p` | pause / resume | Deployment, Rollout |
-| `u` | undo to the previous revision (what `kubectl rollout undo` does) | Deployment, Rollout |
+| `u` | roll back: pick any kept revision, then confirm (what `kubectl rollout undo --to-revision` does) | Deployment, Rollout, StatefulSet, DaemonSet |
 | `P` | promote: unpause, or skip the current step | Rollout |
 | `F` | promote-full: skip all steps and analysis | Rollout |
 | `A` / `Y` | abort / retry | Rollout |
 
-Every action asks for confirmation. `--dry-run` sends them as server-side dry-runs (validated by the API server, nothing changes); `--read-only` disables them.
+Deployments and Rollouts roll back to a ReplicaSet's pod template; StatefulSets and DaemonSets re-apply the
+template stored in their ControllerRevision.
+
+Every action asks for confirmation, and the confirmation lists what to know first — e.g. that the workload is
+managed by an Argo CD Application with self-heal (a rollback is put back to the Git version within minutes:
+roll back in Git instead), that an Argo Rollout without `spec.rollbackWindow` re-runs all canary steps, that
+newer revisions are skipped or the target runs the same image, or that Argo CD is syncing the app right now.
+The same notes stay visible in the rollout details. `--dry-run` sends them as server-side dry-runs (validated by the API server, nothing changes); `--read-only` disables them.
 
 **Net** — tabs `ROUTES` (Ingress, HTTPRoute, GRPCRoute), `GATEWAYS`, `CERTS`, `ISSUERS`. A route shows the whole chain: host → path → Service:port → ready endpoints, and TLS secret → cert-manager Certificate (ready, days left, renewal, pending ACME challenges) → Issuer. Missing services, empty endpoints, missing TLS secrets, failed or expiring certificates (< 14 days) are flagged; certificate problems also go to the warnings ticker. Gateway API and cert-manager are detected; without them those tabs say so.
 

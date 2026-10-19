@@ -42,6 +42,7 @@ pub struct AppInfo {
     /// "auto (prune, selfHeal)" or "manual".
     pub policy: String,
     pub auto: bool,
+    pub self_heal: bool,
     pub op_phase: Option<String>,
     pub op_message: String,
     pub op_by: String,
@@ -167,6 +168,7 @@ pub fn parse(obj: &DynamicObject) -> AppInfo {
             s(dest, &["namespace"])
         ),
         policy,
+        self_heal: auto && automated["selfHeal"].as_bool() == Some(true),
         auto,
         op_phase: Some(s(op, &["phase"])).filter(|x| !x.is_empty()),
         op_message: s(op, &["message"]),

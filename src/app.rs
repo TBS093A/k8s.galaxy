@@ -185,6 +185,14 @@ pub enum Active {
 pub struct Confirm {
     pub pending: Pending,
     pub explain: String,
+    /// What to know before confirming (Ok = information, Warn, Bad).
+    pub warnings: Vec<(Health, String)>,
+}
+
+impl Confirm {
+    pub fn danger(&self) -> bool {
+        self.pending.danger() || self.warnings.iter().any(|(h, _)| *h == Health::Bad)
+    }
 }
 
 pub struct Toast {
@@ -316,6 +324,8 @@ pub struct App {
     /// Show system:* subjects and roles in the RBAC view.
     pub show_system: bool,
     pub confirm: Option<Confirm>,
+    /// Undo: cursor in the selected rollout's revision list (newest first, current excluded).
+    pub rev_picker: Option<usize>,
     pub toast: Option<Toast>,
     /// Who-can query being typed in the RBAC view.
     pub query: Option<String>,
@@ -356,6 +366,7 @@ impl App {
             rbac_tab: RbacTab::Subjects,
             show_system: false,
             confirm: None,
+            rev_picker: None,
             toast: None,
             query: None,
             read_only: false,
@@ -704,7 +715,46 @@ impl App {
         self.toast = Some(Toast { text, ok, at: Instant::now() });
     }
 
-    fn request_action(&mut self, kind: ActionKind) {
+    /// `u`: pick the revision to go back to, then confirm.
+    fn request_undo(&mut self) {
+        let Some(OpsRef::Rollout(r)) = self.selected_ops() else { return };
+        let candidates = r.undo_candidates();
+        if candidates.is_empty() && !self.read_only && r.actions().contains(&ActionKind::Undo) {
+            let text = format!("nothing to roll back to: {} {} keeps only its current revision (r{})", r.kind.as_str(), r.name, r.revision);
+            self.toast = Some(Toast { text, ok: false, at: Instant::now() });
+            return;
+        }
+        if candidates.is_empty() || self.read_only || !r.actions().contains(&ActionKind::Undo) {
+            // Nothing to choose from: the confirmation (or toast) explains why.
+            return self.request_action(ActionKind::Undo, None);
+        }
+        let default = r.undo_target(None).map(|t| t.revision);
+        self.rev_picker = Some(candidates.iter().position(|h| Some(h.revision) == default).unwrap_or(0));
+    }
+
+    fn rev_picker_key(&mut self, key: KeyEvent) {
+        let Some(idx) = self.rev_picker else { return };
+        let Some(OpsRef::Rollout(r)) = self.selected_ops() else {
+            self.rev_picker = None;
+            return;
+        };
+        let candidates: Vec<i64> = r.undo_candidates().iter().map(|h| h.revision).collect();
+        let n = candidates.len().max(1);
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => self.rev_picker = Some((idx + 1) % n),
+            KeyCode::Up | KeyCode::Char('k') => self.rev_picker = Some((idx + n - 1) % n),
+            KeyCode::Enter => {
+                self.rev_picker = None;
+                if let Some(rev) = candidates.get(idx) {
+                    self.request_action(ActionKind::Undo, Some(*rev));
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('u') => self.rev_picker = None,
+            _ => {}
+        }
+    }
+
+    fn request_action(&mut self, kind: ActionKind, to: Option<i64>) {
         let Some(OpsRef::Rollout(r)) = self.selected_ops() else { return };
         if !r.actions().contains(&kind) {
             let available: Vec<_> = r.actions().iter().map(|a| a.label()).collect();
@@ -719,9 +769,10 @@ impl App {
             self.toast = Some(Toast { text: "read-only mode (--read-only): actions disabled".into(), ok: false, at: Instant::now() });
             return;
         }
-        let explain = kind.explain(r);
-        let action = Action { kind, target: r.kind, namespace: r.namespace.clone(), name: r.name.clone() };
-        self.confirm = Some(Confirm { pending: Pending::Rollout(action), explain });
+        let explain = kind.explain(r, to);
+        let warnings = crate::ops::action_warnings(r, kind, to, &self.snap.apps);
+        let action = Action { kind, target: r.kind, namespace: r.namespace.clone(), name: r.name.clone(), to_revision: to };
+        self.confirm = Some(Confirm { pending: Pending::Rollout(action), explain, warnings });
     }
 
     fn request_app_action(&mut self, action: AppAction) {
@@ -745,7 +796,7 @@ impl App {
             self.toast = Some(Toast { text: format!("{}…", action.label()), ok: true, at: Instant::now() });
             return;
         }
-        self.confirm = Some(Confirm { pending, explain });
+        self.confirm = Some(Confirm { pending, explain, warnings: vec![] });
     }
 
     fn cycle_tab(&mut self, step: isize) {
@@ -852,14 +903,17 @@ impl App {
                         Some(OpsRef::Rollout(r)) if r.paused => ActionKind::Resume,
                         _ => ActionKind::Pause,
                     },
-                    'u' => ActionKind::Undo,
+                    'u' => return {
+                        self.request_undo();
+                        true
+                    },
                     'P' => ActionKind::Promote,
                     'F' => ActionKind::PromoteFull,
                     'A' => ActionKind::Abort,
                     'Y' => ActionKind::Retry,
                     _ => return false,
                 };
-                self.request_action(kind);
+                self.request_action(kind, None);
             }
             _ => return false,
         }
@@ -950,6 +1004,9 @@ impl App {
                 _ => {}
             }
             return;
+        }
+        if self.rev_picker.is_some() {
+            return self.rev_picker_key(key);
         }
         if let Some(c) = &self.confirm {
             match key.code {

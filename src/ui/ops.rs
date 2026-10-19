@@ -11,7 +11,7 @@ use super::health_rgb;
 use crate::app::{App, NetTab, OpsRef, RbacTab, View};
 use crate::fx::{self, Rgb};
 use crate::model::Health;
-use crate::ops::{BindingInfo, NetInfo, Phase, RbacInfo, RolloutInfo, RolloutKind, Rule, Subject};
+use crate::ops::{BindingInfo, NetInfo, Phase, RbacInfo, RolloutInfo, Rule, Subject};
 
 const TEXT: Rgb = (200, 220, 230);
 
@@ -70,6 +70,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let [list_area, detail_area] = Layout::horizontal([Constraint::Percentage(54), Constraint::Fill(1)]).areas(area);
     list(f, list_area, app);
     detail(f, detail_area, app);
+    if app.rev_picker.is_some() {
+        rev_picker(f, area, app);
+    }
     if app.confirm.is_some() {
         confirm(f, area, app);
     }
@@ -260,7 +263,7 @@ fn row(app: &App, o: &OpsRef, t: f64) -> Line<'static> {
             if let Some(w) = r.weight {
                 s.push(st(format!(" w{w}%"), fx::MAGENTA));
             }
-            if r.revision > 0 && r.kind != RolloutKind::DaemonSet && r.kind != RolloutKind::StatefulSet {
+            if r.revision > 0 {
                 s.push(st(format!(" r{}", r.revision), fx::STEEL));
             }
             Line::from(s)
@@ -657,6 +660,19 @@ fn rollout_detail(app: &App, r: &RolloutInfo, t: f64, width: usize) -> Vec<Line<
             ]));
         }
     }
+    let notes = crate::ops::caveats(r, &app.snap.apps);
+    if !notes.is_empty() {
+        l.push(Line::raw(""));
+        l.push(section("notes"));
+        for (h, text) in notes {
+            let color = match h {
+                Health::Bad => fx::RED,
+                Health::Warn => fx::AMBER,
+                Health::Ok => fx::STEEL,
+            };
+            l.push(Line::from(vec![st(if h == Health::Ok { "  · " } else { "  ▲ " }, color), st(text, color)]));
+        }
+    }
     l.push(Line::raw(""));
     l.push(section("actions"));
     if app.read_only {
@@ -853,10 +869,15 @@ fn subject_detail(rbac: &RbacInfo, s: &Subject, bindings: &[&BindingInfo]) -> Ve
 
 fn confirm(f: &mut Frame, area: Rect, app: &App) {
     let Some(c) = &app.confirm else { return };
-    let w = 76.min(area.width.saturating_sub(4));
-    let popup = Rect { x: area.x + (area.width.saturating_sub(w)) / 2, y: area.y + area.height / 3, width: w, height: 8 };
+    let w = 96.min(area.width.saturating_sub(4));
+    let inner = w.saturating_sub(2) as usize;
+    // Wrapped height of the warnings (each line is prefixed with "  ▲ ").
+    let warn_rows: usize = c.warnings.iter().map(|(_, t)| (t.chars().count() + 4).div_ceil(inner.max(1))).sum();
+    let explain_rows = c.explain.chars().count().div_ceil(inner.max(1)).max(1);
+    let h = (7 + explain_rows + warn_rows + usize::from(!c.warnings.is_empty())) as u16;
+    let popup = Rect { x: area.x + (area.width.saturating_sub(w)) / 2, y: area.y + area.height.saturating_sub(h) / 3, width: w, height: h };
     f.render_widget(Clear, popup);
-    let danger = c.pending.danger();
+    let danger = c.danger();
     let (verb, kind, target) = c.pending.title();
     let rgb = if danger { fx::RED } else { fx::AMBER };
     let lines = vec![
@@ -866,6 +887,20 @@ fn confirm(f: &mut Frame, area: Rect, app: &App) {
             bold(target, TEXT),
         ]),
         Line::from(st(c.explain.clone(), fx::STEEL)),
+    ];
+    let mut lines = lines;
+    if !c.warnings.is_empty() {
+        lines.push(Line::raw(""));
+        for (h, text) in &c.warnings {
+            let (mark, color) = match h {
+                Health::Bad => ("  ▲ ", fx::RED),
+                Health::Warn => ("  ▲ ", fx::AMBER),
+                Health::Ok => ("  · ", fx::STEEL),
+            };
+            lines.push(Line::from(vec![st(mark, color), st(text.clone(), if *h == Health::Ok { fx::STEEL } else { color })]));
+        }
+    }
+    lines.extend([
         Line::raw(""),
         Line::from(vec![
             Span::styled(" y ", Style::new().fg(fx::c(fx::BG)).bg(fx::c(rgb))),
@@ -874,13 +909,66 @@ fn confirm(f: &mut Frame, area: Rect, app: &App) {
             st(" cancel", TEXT),
             st(if app.dry_run { "      (dry-run: nothing will change)" } else { "" }, fx::AMBER),
         ]),
-    ];
+    ]);
     f.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::bordered()
                 .border_type(BorderType::Double)
                 .border_style(Style::new().fg(fx::c(rgb)))
                 .title(Line::from(bold(" ▲ confirm action ", rgb)))
+                .style(Style::new().bg(fx::c(fx::BG))),
+        ),
+        popup,
+    );
+}
+
+/// `u`: the revisions a rollout can go back to.
+fn rev_picker(f: &mut Frame, area: Rect, app: &App) {
+    let (Some(sel), Some(OpsRef::Rollout(r))) = (app.rev_picker, app.selected_ops()) else { return };
+    let candidates = r.undo_candidates();
+    let default = r.undo_target(None).map(|t| t.revision);
+    let w = 100.min(area.width.saturating_sub(4));
+    let h = (candidates.len() as u16 + 6).min(area.height.saturating_sub(4));
+    let popup = Rect { x: area.x + (area.width.saturating_sub(w)) / 2, y: area.y + area.height.saturating_sub(h) / 3, width: w, height: h };
+    f.render_widget(Clear, popup);
+    let current = r.history.iter().find(|x| x.revision == r.revision);
+    let mut lines = vec![Line::from(vec![
+        st("  now  ", fx::STEEL),
+        bold(format!("r{:<5}", r.revision), fx::MAGENTA),
+        st(current.map(|c| c.image.rsplit('/').next().unwrap_or(&c.image).to_string()).unwrap_or_else(|| r.image.clone()), TEXT),
+    ])];
+    lines.push(Line::raw(""));
+    for (i, rev) in candidates.iter().enumerate() {
+        let selected = i == sel;
+        let style = if selected { Style::new().fg(fx::c(TEXT)).bg(fx::fade(fx::MAGENTA, 0.2)).add_modifier(Modifier::BOLD) } else { Style::new().fg(fx::c(TEXT)) };
+        let tag = if Some(rev.revision) == default {
+            "previous"
+        } else if rev.revision > r.revision {
+            "newer"
+        } else {
+            ""
+        };
+        lines.push(Line::from(vec![
+            st(if selected { " ▶ " } else { "   " }, fx::MAGENTA),
+            Span::styled(format!("r{:<5}", rev.revision), style),
+            st(format!("{:<12}", pad(&rev.name, 11)), fx::STEEL),
+            st(format!("{:<9}", tag), fx::CYAN),
+            st(format!("{:>2}/{:<2} {:<5} ", rev.ready, rev.replicas, rev.age), fx::STEEL),
+            Span::styled(pad(rev.image.rsplit('/').next().unwrap_or(&rev.image), 52), style),
+        ]));
+    }
+    let title = Line::from(vec![
+        Span::styled(" ◆ ", Style::new().fg(fx::c(fx::MAGENTA))),
+        bold(format!("ROLL BACK {} {}/{}", r.kind.as_str(), r.namespace, r.name), fx::MAGENTA),
+        st("  pick a revision ", fx::STEEL),
+    ]);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(fx::c(fx::MAGENTA)))
+                .title(title)
+                .title_bottom(Line::from(st(" j/k select · ⏎ review & confirm · Esc cancel ", fx::STEEL)))
                 .style(Style::new().bg(fx::c(fx::BG))),
         ),
         popup,

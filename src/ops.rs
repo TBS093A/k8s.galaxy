@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, anyhow, bail};
-use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
+use k8s_openapi::api::apps::v1::{ControllerRevision, DaemonSet, Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::core::v1::{Secret, Service, ServiceAccount};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::Ingress;
@@ -111,9 +111,26 @@ pub struct RolloutInfo {
     pub steps: Vec<String>,
     pub step: Option<usize>,
     pub weight: Option<i32>,
+    /// Argo Rollouts `spec.rollbackWindow.revisions`: rollbacks within it skip the steps.
+    pub rollback_window: Option<i64>,
 }
 
 impl RolloutInfo {
+    /// Revision an undo goes to: the requested one, else the newest older than the current.
+    pub fn undo_target(&self, to: Option<i64>) -> Option<&Revision> {
+        match to {
+            Some(t) => self.history.iter().find(|h| h.revision == t),
+            None => self.history.iter().filter(|h| h.revision < self.revision).max_by_key(|h| h.revision),
+        }
+    }
+
+    /// Revisions an undo can go to (everything but the current one), newest first.
+    pub fn undo_candidates(&self) -> Vec<&Revision> {
+        let mut v: Vec<&Revision> = self.history.iter().filter(|h| h.revision != self.revision).collect();
+        v.sort_by_key(|h| std::cmp::Reverse(h.revision));
+        v
+    }
+
     pub fn health(&self) -> Health {
         self.phase.health()
     }
@@ -123,7 +140,7 @@ impl RolloutInfo {
         use ActionKind::*;
         match self.kind {
             RolloutKind::Deployment => vec![Restart, if self.paused { Resume } else { Pause }, Undo],
-            RolloutKind::StatefulSet | RolloutKind::DaemonSet => vec![Restart],
+            RolloutKind::StatefulSet | RolloutKind::DaemonSet => vec![Restart, Undo],
             RolloutKind::Argo => {
                 let mut a = vec![Restart, if self.paused { Resume } else { Pause }, Promote, PromoteFull];
                 a.push(if self.phase == Phase::Aborted { Retry } else { Abort });
@@ -172,13 +189,13 @@ impl ActionKind {
         }
     }
 
-    pub fn explain(self, r: &RolloutInfo) -> String {
+    pub fn explain(self, r: &RolloutInfo, to: Option<i64>) -> String {
         match self {
             ActionKind::Restart => "rolls every pod (new pod template annotation)".into(),
             ActionKind::Pause => "stops the rollout where it is".into(),
             ActionKind::Resume => "continues a paused rollout".into(),
-            ActionKind::Undo => match r.history.iter().find(|h| h.revision < r.revision) {
-                Some(prev) => format!("rolls back to revision {} ({})", prev.revision, prev.image),
+            ActionKind::Undo => match r.undo_target(to) {
+                Some(prev) => format!("rolls back to revision {} ({})", prev.revision, prev.image.rsplit('/').next().unwrap_or(&prev.image)),
                 None => "rolls back to the previous revision".into(),
             },
             ActionKind::Promote => "skips the current pause / advances to the next step".into(),
@@ -195,6 +212,8 @@ pub struct Action {
     pub target: RolloutKind,
     pub namespace: String,
     pub name: String,
+    /// Undo: the revision to go back to (None = the one before the current).
+    pub to_revision: Option<i64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -666,6 +685,7 @@ pub fn rollouts(
     rss: &[ReplicaSet],
     stss: &[StatefulSet],
     dss: &[DaemonSet],
+    crs: &[ControllerRevision],
     argo: &[DynamicObject],
 ) -> Vec<RolloutInfo> {
     let mut out = vec![];
@@ -759,6 +779,7 @@ pub fn rollouts(
             steps: vec![],
             step: None,
             weight: None,
+            rollback_window: None,
         });
     }
 
@@ -788,7 +809,7 @@ pub fn rollouts(
             namespace: s.metadata.namespace.clone().unwrap_or_default(),
             name: s.metadata.name.clone().unwrap_or_default(),
             strategy,
-            revision: s.metadata.generation.unwrap_or(0),
+            revision: cr_current(crs, s.metadata.uid.as_deref()),
             desired,
             updated,
             ready,
@@ -801,10 +822,11 @@ pub fn rollouts(
                 _ => String::new(),
             },
             image: spec.template.spec.as_ref().and_then(|s| s.containers.first()).and_then(|c| c.image.clone()).unwrap_or_default(),
-            history: vec![],
+            history: cr_history(crs, s.metadata.uid.as_deref(), updated, desired),
             steps: vec![],
             step: None,
             weight: None,
+            rollback_window: None,
         });
     }
 
@@ -833,7 +855,7 @@ pub fn rollouts(
             namespace: d.metadata.namespace.clone().unwrap_or_default(),
             name: d.metadata.name.clone().unwrap_or_default(),
             strategy,
-            revision: d.metadata.generation.unwrap_or(0),
+            revision: cr_current(crs, d.metadata.uid.as_deref()),
             desired,
             updated,
             ready: st.number_ready,
@@ -842,10 +864,11 @@ pub fn rollouts(
             phase,
             message: String::new(),
             image: spec.template.spec.as_ref().and_then(|s| s.containers.first()).and_then(|c| c.image.clone()).unwrap_or_default(),
-            history: vec![],
+            history: cr_history(crs, d.metadata.uid.as_deref(), updated, desired),
             steps: vec![],
             step: None,
             weight: None,
+            rollback_window: None,
         });
     }
 
@@ -853,6 +876,45 @@ pub fn rollouts(
         out.push(argo_rollout(r, &history));
     }
     out
+}
+
+fn cr_current(crs: &[ControllerRevision], uid: Option<&str>) -> i64 {
+    crs.iter().filter(|cr| controller_uid(&cr.metadata) == uid).map(|cr| cr.revision).max().unwrap_or(0)
+}
+
+/// StatefulSet/DaemonSet history from their ControllerRevisions, newest first. The newest one is
+/// what updated pods run; while a rollout is in progress the one before it runs the rest.
+fn cr_history(crs: &[ControllerRevision], uid: Option<&str>, updated: i32, desired: i32) -> Vec<Revision> {
+    let mut owned: Vec<&ControllerRevision> = crs.iter().filter(|cr| controller_uid(&cr.metadata) == uid).collect();
+    owned.sort_by_key(|cr| std::cmp::Reverse(cr.revision));
+    owned
+        .iter()
+        .enumerate()
+        .map(|(i, cr)| {
+            let data = cr.data.as_ref().map(|d| &d.0);
+            let image = data
+                .and_then(|d| d["spec"]["template"]["spec"]["containers"].as_array())
+                .and_then(|c| c.first())
+                .and_then(|c| c["image"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            let name = cr.metadata.name.clone().unwrap_or_default();
+            let replicas = match i {
+                0 => updated,
+                1 => (desired - updated).max(0),
+                _ => 0,
+            };
+            Revision {
+                revision: cr.revision,
+                name: name.rsplit('-').next().unwrap_or(&name).to_string(),
+                image,
+                replicas,
+                ready: replicas,
+                age: age(&cr.metadata),
+                role: None,
+            }
+        })
+        .collect()
 }
 
 fn argo_rollout(r: &DynamicObject, history: &dyn Fn(&str, &str) -> Vec<Revision>) -> RolloutInfo {
@@ -948,6 +1010,7 @@ fn argo_rollout(r: &DynamicObject, history: &dyn Fn(&str, &str) -> Vec<Revision>
         steps,
         step,
         weight,
+        rollback_window: v["spec"]["rollbackWindow"]["revisions"].as_i64(),
     }
 }
 
@@ -1338,7 +1401,7 @@ pub async fn perform(client: &Client, crds: &Crds, a: &Action, dry_run: bool) ->
                 Retry => status(json!({"status": {"abort": false}})).await?,
                 Undo => {
                     let ro = api.get(&a.name).await?;
-                    let tpl = previous_template(client, ns, ro.metadata.uid.as_deref(), &ro.metadata.annotations, "rollout.argoproj.io/revision", "rollouts-pod-template-hash").await?;
+                    let tpl = previous_template(client, ns, ro.metadata.uid.as_deref(), &ro.metadata.annotations, "rollout.argoproj.io/revision", "rollouts-pod-template-hash", a.to_revision).await?;
                     api.patch(&a.name, &pp, &Patch::Json::<()>(json_patch_template(tpl)?)).await?;
                 }
             }
@@ -1351,20 +1414,37 @@ pub async fn perform(client: &Client, crds: &Crds, a: &Action, dry_run: bool) ->
                 Resume => drop(api.patch(&a.name, &pp, &Patch::Merge(json!({"spec": {"paused": false}}))).await?),
                 Undo => {
                     let d = api.get(&a.name).await?;
-                    let tpl = previous_template(client, ns, d.metadata.uid.as_deref(), &d.metadata.annotations, "deployment.kubernetes.io/revision", "pod-template-hash").await?;
+                    let tpl = previous_template(client, ns, d.metadata.uid.as_deref(), &d.metadata.annotations, "deployment.kubernetes.io/revision", "pod-template-hash", a.to_revision).await?;
                     api.patch(&a.name, &pp, &Patch::Json::<()>(json_patch_template(tpl)?)).await?;
                 }
                 k => bail!("{} is not supported for Deployments", k.label()),
             }
         }
-        RolloutKind::StatefulSet => match a.kind {
-            Restart => drop(Api::<StatefulSet>::namespaced(client.clone(), ns).patch(&a.name, &pp, &Patch::Merge(restart_patch(&now))).await?),
-            k => bail!("{} is not supported for StatefulSets", k.label()),
-        },
-        RolloutKind::DaemonSet => match a.kind {
-            Restart => drop(Api::<DaemonSet>::namespaced(client.clone(), ns).patch(&a.name, &pp, &Patch::Merge(restart_patch(&now))).await?),
-            k => bail!("{} is not supported for DaemonSets", k.label()),
-        },
+        RolloutKind::StatefulSet => {
+            let api = Api::<StatefulSet>::namespaced(client.clone(), ns);
+            match a.kind {
+                Restart => drop(api.patch(&a.name, &pp, &Patch::Merge(restart_patch(&now))).await?),
+                // What `kubectl rollout undo` does: re-apply the template stored in the ControllerRevision.
+                Undo => {
+                    let uid = api.get(&a.name).await?.metadata.uid;
+                    let data = revision_data(client, ns, uid.as_deref(), a.to_revision).await?;
+                    api.patch(&a.name, &pp, &Patch::Strategic(data)).await?;
+                }
+                k => bail!("{} is not supported for StatefulSets", k.label()),
+            }
+        }
+        RolloutKind::DaemonSet => {
+            let api = Api::<DaemonSet>::namespaced(client.clone(), ns);
+            match a.kind {
+                Restart => drop(api.patch(&a.name, &pp, &Patch::Merge(restart_patch(&now))).await?),
+                Undo => {
+                    let uid = api.get(&a.name).await?.metadata.uid;
+                    let data = revision_data(client, ns, uid.as_deref(), a.to_revision).await?;
+                    api.patch(&a.name, &pp, &Patch::Strategic(data)).await?;
+                }
+                k => bail!("{} is not supported for DaemonSets", k.label()),
+            }
+        }
     }
     Ok(format!(
         "{}{} {} {}/{}",
@@ -1397,6 +1477,7 @@ async fn previous_template(
     annotations: &Option<BTreeMap<String, String>>,
     rev_key: &str,
     hash_label: &str,
+    to: Option<i64>,
 ) -> Result<Value> {
     let current: i64 = annotations.as_ref().and_then(|a| a.get(rev_key)).and_then(|r| r.parse().ok()).unwrap_or(i64::MAX);
     let rss = Api::<ReplicaSet>::namespaced(client.clone(), ns).list(&ListParams::default()).await?;
@@ -1406,10 +1487,17 @@ async fn previous_template(
         .filter(|rs| controller_uid(&rs.metadata) == owner_uid)
         .filter_map(|rs| {
             let rev: i64 = rs.metadata.annotations.as_ref()?.get(rev_key)?.parse().ok()?;
-            (rev < current).then_some((rev, rs))
+            let wanted = match to {
+                Some(t) => rev == t && rev != current,
+                None => rev < current,
+            };
+            wanted.then_some((rev, rs))
         })
         .max_by_key(|(rev, _)| *rev)
-        .ok_or_else(|| anyhow!("no previous revision to roll back to"))?;
+        .ok_or_else(|| match to {
+            Some(t) => anyhow!("revision {t} is not kept any more"),
+            None => anyhow!("no previous revision to roll back to"),
+        })?;
     let mut tpl = serde_json::to_value(prev.1.spec.and_then(|s| s.template).ok_or_else(|| anyhow!("ReplicaSet has no template"))?)?;
     if let Some(labels) = tpl["metadata"]["labels"].as_object_mut() {
         labels.remove(hash_label);
@@ -1417,8 +1505,107 @@ async fn previous_template(
     Ok(tpl)
 }
 
+/// Stored template patch of a StatefulSet/DaemonSet ControllerRevision: the requested revision,
+/// else the newest one older than the current (= newest) revision.
+async fn revision_data(client: &Client, ns: &str, owner_uid: Option<&str>, to: Option<i64>) -> Result<Value> {
+    let crs = Api::<ControllerRevision>::namespaced(client.clone(), ns).list(&ListParams::default()).await?;
+    let mut owned: Vec<ControllerRevision> = crs.items.into_iter().filter(|cr| controller_uid(&cr.metadata) == owner_uid).collect();
+    owned.sort_by_key(|cr| std::cmp::Reverse(cr.revision));
+    let current = owned.first().map(|cr| cr.revision).ok_or_else(|| anyhow!("no ControllerRevisions found"))?;
+    let pick = match to {
+        Some(t) if t == current => bail!("revision {t} is the current one"),
+        Some(t) => owned.into_iter().find(|cr| cr.revision == t).ok_or_else(|| anyhow!("revision {t} is not kept any more"))?,
+        None => owned.into_iter().find(|cr| cr.revision < current).ok_or_else(|| anyhow!("no previous revision to roll back to"))?,
+    };
+    pick.data.map(|d| d.0).ok_or_else(|| anyhow!("ControllerRevision {} has no data", pick.metadata.name.unwrap_or_default()))
+}
+
 fn json_patch_template(tpl: Value) -> Result<json_patch::Patch> {
     Ok(serde_json::from_value(json!([{"op": "replace", "path": "/spec/template", "value": tpl}]))?)
+}
+
+/// Argo CD Application whose resources include this workload.
+pub fn managing_app<'a>(r: &RolloutInfo, apps: &'a [crate::gitops::AppInfo]) -> Option<&'a crate::gitops::AppInfo> {
+    apps.iter().find(|a| a.resources.iter().any(|x| x.kind == r.kind.as_str() && x.namespace == r.namespace && x.name == r.name))
+}
+
+/// Things to know before an action: will it stick, what else happens. `Health::Ok` = information.
+pub fn action_warnings(r: &RolloutInfo, kind: ActionKind, to: Option<i64>, apps: &[crate::gitops::AppInfo]) -> Vec<(Health, String)> {
+    let mut w = vec![];
+    let app = managing_app(r, apps);
+    if let Some(a) = app
+        && a.running()
+    {
+        w.push((Health::Warn, format!("Argo CD is syncing app {} right now — it may overwrite this", a.name)));
+    }
+    match kind {
+        ActionKind::Undo => {
+            match r.undo_target(to) {
+                None => w.push((Health::Bad, "no older revision is kept (revisionHistoryLimit: 0?) — nothing to roll back to".into())),
+                Some(prev) => {
+                    let skipped = r.history.iter().filter(|h| h.revision > prev.revision && h.revision < r.revision).count();
+                    if skipped > 0 {
+                        w.push((Health::Ok, format!("r{} → r{}, skipping {skipped} newer revision(s)", r.revision, prev.revision)));
+                    }
+                    if prev.revision > r.revision {
+                        w.push((Health::Warn, format!("r{} is newer than the current r{} — this rolls forward, not back", prev.revision, r.revision)));
+                    }
+                    if prev.image == r.image {
+                        w.push((Health::Warn, format!("r{} runs the same image ({}) — only other pod-template fields change", prev.revision, prev.image)));
+                    }
+                }
+            }
+            match app {
+                Some(a) if a.self_heal => w.push((
+                    Health::Bad,
+                    format!(
+                        "Argo CD app {} has self-heal: it puts the Git version back within minutes. For a lasting rollback revert the commit in Git (or pin targetRevision).",
+                        a.name
+                    ),
+                )),
+                Some(a) if a.auto => w.push((Health::Warn, format!("Argo CD app {} auto-syncs: the next Git change rolls forward again; the app shows OutOfSync until then", a.name))),
+                Some(a) => w.push((Health::Warn, format!("Argo CD app {} will show OutOfSync; its next sync re-applies the Git version", a.name))),
+                None => {}
+            }
+            if r.kind == RolloutKind::Argo && !r.steps.is_empty() && r.rollback_window.is_none() {
+                w.push((
+                    Health::Warn,
+                    format!("no spec.rollbackWindow: the rollback runs all {} canary steps again (F promote-full skips them)", r.steps.len()),
+                ));
+            }
+        }
+        ActionKind::Pause if app.is_some() => w.push((Health::Ok, "Argo CD will report the app as Suspended while paused".into())),
+        ActionKind::PromoteFull => w.push((Health::Warn, "skips the remaining steps and analysis — no automatic safety net".into())),
+        ActionKind::Abort => w.push((Health::Ok, "traffic goes back to stable; the rollout stays Degraded until retry (Y) or a new revision".into())),
+        _ => {}
+    }
+    w
+}
+
+/// Standing notes for the details pane.
+pub fn caveats(r: &RolloutInfo, apps: &[crate::gitops::AppInfo]) -> Vec<(Health, String)> {
+    let mut c = vec![];
+    match managing_app(r, apps) {
+        Some(a) if a.self_heal => {
+            c.push((Health::Ok, format!("managed by Argo CD app {} ({})", a.name, a.policy)));
+            c.push((Health::Warn, "undo (u) is temporary: self-heal restores the Git version — roll back in Git".into()));
+        }
+        Some(a) => c.push((Health::Ok, format!("managed by Argo CD app {} ({})", a.name, a.policy))),
+        None => {}
+    }
+    match r.kind {
+        RolloutKind::StatefulSet | RolloutKind::DaemonSet => {
+            c.push((Health::Warn, format!("no rollback for {}s here (history is in ControllerRevisions) — change the image in Git", r.kind.as_str())))
+        }
+        RolloutKind::Argo if !r.steps.is_empty() && r.rollback_window.is_none() => {
+            c.push((Health::Ok, "no spec.rollbackWindow: a rollback re-runs the canary steps".into()))
+        }
+        _ => {}
+    }
+    if (r.kind == RolloutKind::Deployment || r.kind == RolloutKind::Argo) && !r.history.iter().any(|h| h.revision < r.revision) {
+        c.push((Health::Warn, "no older revision kept — nothing to roll back to".into()))
+    }
+    c
 }
 
 #[cfg(test)]
@@ -1439,6 +1626,47 @@ mod tests {
         assert!(rule(&["get", "list"], &["pods"]).risk().is_none());
         assert!(rule(&["get"], &["pods"]).allows("get", "pods", ""));
         assert!(!rule(&["get"], &["pods"]).allows("delete", "pods", ""));
+    }
+
+    #[test]
+    fn undo_warnings() {
+        let rev = |n: i64, image: &str| Revision { revision: n, name: format!("h{n}"), image: image.into(), replicas: 0, ready: 0, age: "1d".into(), role: None };
+        let r = RolloutInfo {
+            kind: RolloutKind::Deployment,
+            namespace: "shop".into(),
+            name: "api".into(),
+            strategy: String::new(),
+            revision: 5,
+            desired: 1,
+            updated: 1,
+            ready: 1,
+            available: 1,
+            paused: false,
+            phase: Phase::Complete,
+            message: String::new(),
+            image: "api:5".into(),
+            history: vec![rev(5, "api:5"), rev(4, "api:4"), rev(3, "api:3")],
+            steps: vec![],
+            step: None,
+            weight: None,
+            rollback_window: None,
+        };
+        assert_eq!(r.undo_target(None).unwrap().revision, 4);
+        assert_eq!(r.undo_candidates().iter().map(|h| h.revision).collect::<Vec<_>>(), vec![4, 3]);
+        let app: crate::gitops::AppInfo = {
+            let obj: DynamicObject = serde_json::from_value(json!({
+                "apiVersion": "argoproj.io/v1alpha1", "kind": "Application", "metadata": {"name": "shop", "namespace": "argocd"},
+                "spec": {"source": {"repoURL": "https://git/x.git"}, "destination": {"namespace": "shop"},
+                         "syncPolicy": {"automated": {"selfHeal": true}}},
+                "status": {"resources": [{"kind": "Deployment", "namespace": "shop", "name": "api", "status": "Synced"}]}
+            }))
+            .unwrap();
+            crate::gitops::parse(&obj)
+        };
+        let w = action_warnings(&r, ActionKind::Undo, Some(3), std::slice::from_ref(&app));
+        assert!(w.iter().any(|(h, t)| *h == Health::Bad && t.contains("self-heal")));
+        assert!(w.iter().any(|(_, t)| t.contains("skipping 1 newer")));
+        assert!(action_warnings(&r, ActionKind::Undo, None, &[]).iter().all(|(h, _)| *h != Health::Bad));
     }
 
     #[test]

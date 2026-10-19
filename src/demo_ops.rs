@@ -51,6 +51,7 @@ fn ro(kind: RolloutKind, ns: &str, name: &str, strategy: &str, desired: i32, upd
         steps: vec![],
         step: None,
         weight: None,
+        rollback_window: None,
     }
 }
 
@@ -123,6 +124,11 @@ impl OpsSim {
 
         let mut cilium = ro(DaemonSet, "kube-system", "cilium", "RollingUpdate unavail 1", 7, 5, 6, Progressing, "quay.io/cilium/cilium:v1.18.2");
         cilium.revision = 4;
+        cilium.history = vec![
+            rev(4, "7c9d4b5f8", "quay.io/cilium/cilium:v1.18.2", 5, 5, "3m", None),
+            rev(3, "6b8c3a4e7", "quay.io/cilium/cilium:v1.18.1", 2, 2, "19d", None),
+            rev(2, "5a7b2f3d6", "quay.io/cilium/cilium:v1.17.6", 0, 0, "62d", None),
+        ];
         rollouts.push(DemoRollout { info: cilium, timer: 3 });
         rollouts.push(DemoRollout {
             info: ro(DaemonSet, "monitoring", "node-exporter", "RollingUpdate unavail 1", 7, 7, 7, Complete, "prom/node-exporter:v1.9.1"),
@@ -130,6 +136,8 @@ impl OpsSim {
         });
         let mut pg = ro(StatefulSet, "shop", "postgres", "RollingUpdate partition 1", 3, 1, 3, Progressing, "postgres:17.6");
         pg.message = "postgres-6b8d9f → postgres-7c9e1a".into();
+        pg.revision = 7;
+        pg.history = vec![rev(7, "7c9e1a", "postgres:17.6", 1, 1, "4m", None), rev(6, "6b8d9f", "postgres:17.5", 2, 2, "40d", None)];
         rollouts.push(DemoRollout { info: pg, timer: 0 });
         for (ns, name, image) in [
             ("monitoring", "prometheus", "prom/prometheus:v3.6.0"),
@@ -309,7 +317,7 @@ impl OpsSim {
                 r.phase = Phase::Progressing;
             }
             Undo => {
-                let prev = r.history.iter().find(|h| h.revision < r.revision).cloned().ok_or("no previous revision")?;
+                let prev = r.undo_target(a.to_revision).cloned().ok_or("no previous revision")?;
                 r.revision = r.history.iter().map(|h| h.revision).max().unwrap_or(r.revision) + 1;
                 r.image = prev.image.clone();
                 r.history.retain(|h| h.revision != prev.revision);
@@ -588,6 +596,7 @@ fn app(project: &str, name: &str, sync: &str, health: &str, source: &str, dest_n
         destination: format!("in-cluster → ns {dest_ns}"),
         policy: if auto { "auto (prune, selfHeal)".into() } else { "manual".into() },
         auto,
+        self_heal: auto,
         op_phase: Some("Succeeded".into()),
         op_message: "successfully synced (all tasks run)".into(),
         op_by: "automated".into(),

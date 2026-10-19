@@ -7,7 +7,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
+use k8s_openapi::api::apps::v1::{ControllerRevision, DaemonSet, Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::core::v1::{Event, Node, Pod, PodSpec, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{ListParams, LogParams};
@@ -195,7 +195,8 @@ impl Source {
                     Api::<DaemonSet>::all(client.clone()),
                     Api::<StatefulSet>::all(client.clone()),
                 );
-                let (nodes, pods, events, deps, rss, dss, stss) = tokio::try_join!(
+                let cr_api = Api::<ControllerRevision>::all(client.clone());
+                let (nodes, pods, events, deps, rss, dss, stss, crs) = tokio::try_join!(
                     node_api.list(&lp),
                     pod_api.list(&lp),
                     event_api.list(&lp),
@@ -203,12 +204,13 @@ impl Source {
                     rs_api.list(&lp),
                     ds_api.list(&lp),
                     sts_api.list(&lp),
+                    cr_api.list(&lp),
                 )?;
                 let argo = match &rollout_crd {
                     Some(ar) => Api::<kube::api::DynamicObject>::all_with(client.clone(), ar).list(&lp).await.map(|l| l.items).unwrap_or_default(),
                     None => vec![],
                 };
-                let rollouts = ops::rollouts(&deps.items, &rss.items, &stss.items, &dss.items, &argo);
+                let rollouts = ops::rollouts(&deps.items, &rss.items, &stss.items, &dss.items, &crs.items, &argo);
                 let mut workloads = vec![];
                 for d in deps.items {
                     let s = d.status.unwrap_or_default();
