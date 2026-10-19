@@ -411,6 +411,8 @@ pub struct App {
     pub query: Option<String>,
     pub read_only: bool,
     pub dry_run: bool,
+    /// The costs window (`$`) is open.
+    pub costs_open: bool,
     /// Clusters found in ~/.kube and $KUBECONFIG, their probe results, and the picker cursor
     /// (rows: the clusters, then the demo).
     pub clusters: Vec<ClusterEntry>,
@@ -453,6 +455,7 @@ impl App {
             query: None,
             read_only: false,
             dry_run: false,
+            costs_open: false,
             clusters: vec![],
             probes: vec![],
             picker: None,
@@ -1207,6 +1210,13 @@ impl App {
         if self.rev_picker.is_some() {
             return self.rev_picker_key(key);
         }
+        if self.costs_open {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('$') => self.costs_open = false,
+                _ => {}
+            }
+            return;
+        }
         if let Some(c) = &self.confirm {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -1229,6 +1239,7 @@ impl App {
             KeyCode::Esc if self.focus == Focus::Resources => self.focus = Focus::Nodes,
             KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => self.open_picker(),
+            KeyCode::Char('$') => self.costs_open = true,
             KeyCode::Char('1') => self.view = View::Map,
             KeyCode::Char('2') => self.view = View::Galaxy,
             KeyCode::Char('3') => self.view = View::Radar,

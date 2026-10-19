@@ -1414,3 +1414,46 @@ pub fn demo_cleanup() -> Vec<Finding> {
         ),
     ]
 }
+
+/// A Hetzner bill for the demo nodes (ids match their `hcloud://` providerIDs).
+pub fn demo_costs() -> crate::costs::Costs {
+    use crate::costs::{Costs, Item};
+    let up: k8s_openapi::jiff::Timestamp =
+        k8s_openapi::jiff::Timestamp::from_second(k8s_openapi::jiff::Timestamp::now().as_second() - 3 * 86_400 - 5 * 3600).unwrap();
+    let server = |name: &str, ty: &str, loc: &str, h: f64, m: f64| Item {
+        kind: "server",
+        name: name.into(),
+        detail: ty.into(),
+        location: loc.into(),
+        hourly: h,
+        monthly: m,
+        id: (40_000_000 + crate::fx::hash(name) % 9_000_000).to_string(),
+        created: Some(up),
+        running: true,
+    };
+    let other = |kind, name: &str, detail: &str, m: f64| Item {
+        kind,
+        name: name.into(),
+        detail: detail.into(),
+        location: "fsn1".into(),
+        hourly: 0.0,
+        monthly: m,
+        id: String::new(),
+        created: None,
+        running: true,
+    };
+    Costs {
+        currency: "EUR".into(),
+        items: vec![
+            server("cp-fsn1-1", "cx32", "fsn1", 0.0112, 6.80),
+            server("worker-fsn1-1", "cx42", "fsn1", 0.0302, 18.85),
+            server("worker-hel1-1", "cx42", "hel1", 0.0302, 18.85),
+            server("worker-nbg1-1", "ccx23", "nbg1", 0.0446, 27.83),
+            other("volume", "pvc-3f1c9a2e", "50 GB", 2.20),
+            other("snapshot", "k8s-cluster-000 2026-10-01", "61.4 GB", 0.73),
+            other("primary ip", "cp-fsn1-1", "49.13.77.21", 0.60),
+            other("floating ip", "public", "49.13.77.10", 3.57),
+            other("load balancer", "public-gw", "lb11", 6.41),
+        ],
+    }
+}

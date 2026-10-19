@@ -22,6 +22,8 @@ under a dated heading, `## X.Y.Z - YYYY-MM-DD` (checked by the release workflow)
 - CPU/memory from metrics-server, requests vs allocatable without it.
 - Cluster picker for every kubeconfig in `~/.kube` and `$KUBECONFIG`, with infrastructure
   detection (managed EKS/GKE/AKS/…, cloud VMs, bare metal, local, hybrid) and the distribution.
+- Costs: the Hetzner Cloud bill in the header, per node and in a `$` window (uptime, cost since up,
+  cost while powered down).
 - Cleanup view: leftover volumes, pods, jobs, ACME solvers, broken routes, failing certificates,
   unused config, selector-less services and empty namespaces, with deletes behind a confirmation.
 - Watch API for nodes, pods, events and workloads: snapshots read local caches (default refresh 2 s).

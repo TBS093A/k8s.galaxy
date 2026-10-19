@@ -68,6 +68,9 @@ fn popups_render_at_every_size() {
     });
     render_all(&mut app);
     app.confirm = None;
+    app.costs_open = true;
+    render_all(&mut app);
+    app.costs_open = false;
     app.open_picker();
     render_all(&mut app);
 }

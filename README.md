@@ -189,6 +189,14 @@ Flagged (and sent to the warnings ticker): Pending claims, Lost/Failed volumes, 
 data, `hostPath` volumes without node affinity (a pod moved to another node sees an empty directory), volumes
 ≥ 85 % / 95 % full, a node filesystem filling up.
 
+## Costs
+
+With a Hetzner token (`--hcloud-env-file` / `HCLOUD_TOKEN`) the header shows what the cluster costs per month,
+each node's details show its server type and hourly price, and `$` opens the bill: servers, volumes, snapshots,
+primary and floating IPs and load balancers with gross list prices from the API, the total per month and hour,
+how long the servers have been up and what that has cost, and what stays billed with the servers deleted
+(snapshots, volumes, IPs).
+
 ## Cleanup
 
 `9 CLEANUP` collects what is probably left over, grouped by kind, with the reason and age:
@@ -212,7 +220,7 @@ watch streams into local caches: the API server sends only changes. Traffic, RBA
 
 ## Keys
 
-`1-9`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `m` measure volumes (storage view) · `d` delete (cleanup view) · `c` clusters · `r` refresh now · `q` quit
+`1-9`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `m` measure volumes (storage view) · `d` delete (cleanup view) · `c` clusters · `$` costs · `r` refresh now · `q` quit
 
 ## Layout
 
@@ -229,6 +237,7 @@ src/
   infra.rs    managed / cloud VMs / bare metal / local detection, distributions
   kubeconfigs.rs  kubeconfig discovery in ~/.kube and $KUBECONFIG, cluster probes
   metrics.rs  metrics-server usage, quantity parsing
+  costs.rs    cloud bill (Hetzner API prices; AWS, GCP, Azure pricing)
   cleanup.rs  leftover detection and deletes
   watch.rs    watch streams + reflector caches for the live lists
   storage.rs  PV/PVC/StorageClass, in-cluster vs external, kubelet volume stats, du measurement

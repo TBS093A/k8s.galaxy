@@ -240,6 +240,7 @@ impl Sim {
             metrics: Some(self.metrics()),
             storage: crate::demo_ops::demo_storage(),
             cleanup: self.ops.cleanup(),
+            costs: Some(crate::demo_ops::demo_costs()),
             infra: Default::default(),
             helm: self.helm(),
             fetched_at: Instant::now(),

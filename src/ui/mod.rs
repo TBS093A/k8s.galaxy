@@ -1,3 +1,4 @@
+mod costs;
 pub mod galaxy;
 mod labels;
 mod map;
@@ -39,6 +40,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     panels::footer(f, footer, app);
     if app.logs.is_some() {
         panels::logs(f, area, app);
+    }
+    if app.costs_open {
+        costs::draw(f, area, app);
     }
     if app.picker.is_some() {
         picker::draw(f, area, app);

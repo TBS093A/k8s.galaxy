@@ -294,6 +294,7 @@ impl Source {
                     apps: slow.apps.clone(),
                     metrics: slow.metrics.clone(),
                     storage: slow.storage.clone(),
+                    costs: None,
                     cleanup: slow.cleanup.clone(),
                     infra: Default::default(),
                     fetched_at: Instant::now(),
@@ -395,6 +396,8 @@ pub async fn run(
     let mut instances: Vec<CloudInstance> = vec![];
     let mut cloud_errors: Vec<EventInfo> = vec![];
     let mut cloud_at: Option<Instant> = None;
+    let mut costs: Option<crate::costs::Costs> = None;
+    let mut cost_error: Option<EventInfo> = None;
     loop {
         // Nothing to poll while no cluster is chosen: only serve commands (switch, probe).
         if !matches!(source, Source::Idle) {
@@ -414,8 +417,26 @@ pub async fn run(
                                 count: 1,
                             })
                             .collect();
+                        // Prices change rarely too: refresh with the inventory.
+                        if let Some(token) = &cloud_poll.config.hcloud_token {
+                            match crate::costs::hetzner(token).await {
+                                Ok(c) => (costs, cost_error) = (Some(c), None),
+                                Err(e) => {
+                                    cost_error = Some(EventInfo {
+                                        reason: "CloudAPI".into(),
+                                        object: "hetzner/costs".into(),
+                                        message: format!("{e:#}"),
+                                        count: 1,
+                                    })
+                                }
+                            }
+                        }
                     }
                     snap.warnings.splice(0..0, cloud_errors.iter().cloned());
+                    snap.warnings.splice(0..0, cost_error.iter().cloned());
+                    if snap.costs.is_none() {
+                        snap.costs = costs.clone();
+                    }
                     snap.nodes.iter_mut().for_each(|n| resolver.apply(n, &instances));
                     snap.nodes.sort_by(|a, b| (&a.place, &a.name).cmp(&(&b.place, &b.name)));
                     let (server, version) = source.server_version();
@@ -458,6 +479,7 @@ pub async fn run(
                                 source = new;
                                 last_good = None;
                                 instances.clear();
+                                costs = None;
                                 cloud_errors.clear();
                                 cloud_at = None;
                                 if tx.send(Msg::Switched { cluster: source.cluster() }).is_err() {

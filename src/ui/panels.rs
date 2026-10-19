@@ -25,6 +25,9 @@ pub fn header(f: &mut Frame, area: Rect, app: &App) {
     if snap.infra.hosting != crate::infra::Hosting::Unknown {
         spans.push(styled(format!("[{}] ", snap.infra.badge()), super::picker::hosting_rgb(&snap.infra)));
     }
+    if let Some(c) = &snap.costs {
+        spans.push(styled(format!("{}{:.0}/mo ", c.symbol(), c.monthly()), fx::AMBER));
+    }
     spans.push(Span::raw(" "));
     // Nine views do not fit next to a long cluster name on a narrow terminal: short labels then.
     let full: usize = View::ALL.iter().enumerate().map(|(i, v)| format!(" {} {} ", i + 1, v.title()).chars().count()).sum();
@@ -119,11 +122,19 @@ pub fn sidebar(f: &mut Frame, area: Rect, app: &App) {
                 kv("region", format!("{} / {}", dash(&n.region), dash(&n.zone))),
                 kv("ip", format!("{}  {}", n.internal_ip, n.kubelet)),
                 kv("infra", {
-                    // What the node is, plus the cloud server id when an inventory matched it.
-                    let id = n.cloud.as_deref().and_then(|c| c.split_whitespace().last()).filter(|id| id.starts_with('#'));
-                    match id {
-                        Some(id) => format!("{} {id}", crate::infra::node_kind(n)),
-                        None => crate::infra::node_kind(n),
+                    // What the node is; with a Hetzner bill, the server type and its price instead of the id.
+                    let id = n
+                        .cloud
+                        .as_deref()
+                        .and_then(|c| c.split_whitespace().last())
+                        .filter(|id| id.starts_with('#'))
+                        .map(|id| id.trim_start_matches('#').to_string())
+                        .or_else(|| n.provider_id.strip_prefix("hcloud://").map(str::to_string));
+                    let priced = id.as_deref().and_then(|id| Some((app.snap.costs.as_ref()?, app.snap.costs.as_ref()?.server(id)?)));
+                    match (priced, &id) {
+                        (Some((c, s)), _) => format!("{} {} · {}{:.3}/h", crate::infra::node_kind(n), s.detail, c.symbol(), s.hourly),
+                        (None, Some(id)) => format!("{} #{id}", crate::infra::node_kind(n)),
+                        _ => crate::infra::node_kind(n),
                     }
                 }),
                 load_line(
@@ -303,6 +314,7 @@ pub fn footer(f: &mut Frame, area: Rect, app: &App) {
             ("⏎", "details"),
             ("Esc", "map"),
             ("c", "clusters"),
+            ("$", "costs"),
             ("r", "refresh"),
             ("q", "quit"),
         ]
@@ -318,6 +330,7 @@ pub fn footer(f: &mut Frame, area: Rect, app: &App) {
             ("f", "fit"),
             ("0", "world"),
             ("c", "clusters"),
+            ("$", "costs"),
             ("r", "refresh"),
             ("q", "quit"),
         ]
