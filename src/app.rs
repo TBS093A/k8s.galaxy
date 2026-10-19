@@ -203,6 +203,8 @@ pub enum Pending {
     App { namespace: String, name: String, action: AppAction },
     Measure(Vec<MeasureTarget>),
     Delete(crate::cleanup::Finding),
+    Cordon { node: String, on: bool },
+    Drain(crate::nodeops::DrainPlan),
 }
 
 impl Pending {
@@ -215,6 +217,8 @@ impl Pending {
                 let nodes: std::collections::BTreeSet<&str> = t.iter().map(|t| t.node.as_str()).collect();
                 ("MEASURE".into(), "volumes", format!("{} hostPath/local volume(s) on {} node(s)", t.len(), nodes.len()))
             }
+            Pending::Cordon { node, on } => (if *on { "CORDON" } else { "UNCORDON" }.into(), "Node", node.clone()),
+            Pending::Drain(p) => ("DRAIN".into(), "Node", p.node.clone()),
             Pending::Delete(f) => {
                 ("DELETE".into(), f.kind, if f.namespace.is_empty() { f.name.clone() } else { format!("{}/{}", f.namespace, f.name) })
             }
@@ -227,6 +231,8 @@ impl Pending {
             Pending::App { action, .. } => *action == AppAction::SyncPrune,
             Pending::Measure(_) => false,
             Pending::Delete(_) => true,
+            Pending::Cordon { .. } => false,
+            Pending::Drain(_) => true,
         }
     }
 
@@ -238,6 +244,8 @@ impl Pending {
             }
             Pending::Measure(t) => Cmd::Measure(t.clone()),
             Pending::Delete(f) => Cmd::Delete(f.clone()),
+            Pending::Cordon { node, on } => Cmd::Cordon { node: node.clone(), on: *on },
+            Pending::Drain(p) => Cmd::Drain(p.clone()),
         }
     }
 }
@@ -805,6 +813,36 @@ impl App {
         self.measured.get(v.pv.as_deref()?)?.as_ref().ok()
     }
 
+    /// `C` on the node list: cordon / uncordon the selected node.
+    fn request_cordon(&mut self) {
+        let Some(n) = self.selected_node() else { return };
+        if self.read_only {
+            self.toast = Some(Toast { text: "read-only mode (--read-only): node actions disabled".into(), ok: false, at: Instant::now() });
+            return;
+        }
+        let on = !n.unschedulable;
+        let warnings = if on {
+            vec![(Health::Ok, "no new pods are scheduled here; running pods stay (D drains them)".into())]
+        } else {
+            vec![(Health::Ok, "the scheduler may place pods here again".into())]
+        };
+        let explain = if on { "marks the node unschedulable" } else { "makes the node schedulable again" }.to_string();
+        self.confirm = Some(Confirm { pending: Pending::Cordon { node: n.name.clone(), on }, explain, warnings });
+    }
+
+    /// `D` on the node list: drain the selected node, after a confirmation with the plan.
+    fn request_drain(&mut self) {
+        let Some(n) = self.selected_node() else { return };
+        if self.read_only {
+            self.toast = Some(Toast { text: "read-only mode (--read-only): node actions disabled".into(), ok: false, at: Instant::now() });
+            return;
+        }
+        let plan = crate::nodeops::plan(&self.snap, &n.name);
+        let explain = "cordons, then evicts its pods so they are rescheduled elsewhere (like kubectl drain)".to_string();
+        let warnings = plan.warnings.clone();
+        self.confirm = Some(Confirm { pending: Pending::Drain(plan), explain, warnings });
+    }
+
     /// `d` in the cleanup view: delete the selected candidate after confirmation.
     fn request_delete(&mut self) {
         let Some(OpsRef::Finding(f)) = self.selected_ops() else { return };
@@ -1268,6 +1306,8 @@ impl App {
             KeyCode::Char('-') => self.zoom_by(1.0 / 1.6),
             KeyCode::Char('0') => self.cam_target = Camera::WORLD,
             KeyCode::Char('f') => self.fit(),
+            KeyCode::Char('C') if self.focus == Focus::Nodes => self.request_cordon(),
+            KeyCode::Char('D') if self.focus == Focus::Nodes => self.request_drain(),
             KeyCode::Char('H') => self.pan(-1.0, 0.0),
             KeyCode::Char('L') => self.pan(1.0, 0.0),
             KeyCode::Char('K') => self.pan(0.0, 1.0),

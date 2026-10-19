@@ -12,6 +12,8 @@ pub enum Health {
 pub struct NodeInfo {
     pub name: String,
     pub ready: bool,
+    /// Cordoned: no new pods are scheduled here.
+    pub unschedulable: bool,
     pub roles: Vec<String>,
     pub labels: BTreeMap<String, String>,
     pub annotations: BTreeMap<String, String>,
@@ -40,6 +42,7 @@ impl NodeInfo {
         NodeInfo {
             name: name.into(),
             ready: true,
+            unschedulable: false,
             roles: vec![],
             labels: Default::default(),
             annotations: Default::default(),
@@ -83,6 +86,27 @@ pub struct PodInfo {
     pub owner: Option<(String, String)>,
     /// Sum of container requests.
     pub requests: crate::metrics::Usage,
+    pub labels: BTreeMap<String, String>,
+    /// What a drain must know: data on the node's disk, scratch data, static (mirror) pod.
+    pub host_path: bool,
+    pub empty_dir: bool,
+    pub mirror: bool,
+}
+
+/// A PodDisruptionBudget: how many pods it lets go at the moment.
+#[derive(Clone, Debug)]
+pub struct PdbInfo {
+    pub namespace: String,
+    pub name: String,
+    /// matchLabels of the selector (matchExpressions are not evaluated).
+    pub selector: BTreeMap<String, String>,
+    pub allowed: i32,
+}
+
+impl PdbInfo {
+    pub fn covers(&self, p: &PodInfo) -> bool {
+        p.namespace == self.namespace && !self.selector.is_empty() && self.selector.iter().all(|(k, v)| p.labels.get(k) == Some(v))
+    }
 }
 
 const BAD_REASONS: &[&str] =
@@ -202,6 +226,7 @@ pub struct Snapshot {
     pub cleanup: Vec<crate::cleanup::Finding>,
     /// Hetzner Cloud bill, when a token is available.
     pub costs: Vec<crate::costs::Costs>,
+    pub pdbs: Vec<PdbInfo>,
     pub fetched_at: Instant,
     pub error: Option<String>,
 }
@@ -225,6 +250,7 @@ impl Snapshot {
             storage: Default::default(),
             cleanup: vec![],
             costs: vec![],
+            pdbs: vec![],
             fetched_at: Instant::now(),
             error: None,
         }

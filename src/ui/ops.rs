@@ -85,9 +85,6 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     if app.rev_picker.is_some() {
         rev_picker(f, area, app);
     }
-    if app.confirm.is_some() {
-        confirm(f, area, app);
-    }
 }
 
 fn list(f: &mut Frame, area: Rect, app: &App) {
@@ -1165,7 +1162,7 @@ fn subject_detail(rbac: &RbacInfo, s: &Subject, bindings: &[&BindingInfo]) -> Ve
     l
 }
 
-fn confirm(f: &mut Frame, area: Rect, app: &App) {
+pub(super) fn confirm(f: &mut Frame, area: Rect, app: &App) {
     let Some(c) = &app.confirm else { return };
     let w = 96.min(area.width.saturating_sub(4));
     let inner = w.saturating_sub(2) as usize;

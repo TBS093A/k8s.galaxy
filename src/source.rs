@@ -41,6 +41,7 @@ pub struct SlowState {
     helm: Vec<HelmRelease>,
     storage: crate::storage::StorageInfo,
     cleanup: Vec<crate::cleanup::Finding>,
+    pdbs: Vec<crate::model::PdbInfo>,
     apps: Vec<AppInfo>,
     metrics: Option<Metrics>,
     /// Errors of the 20 s lane and of the 5 s lane (apps, metrics), kept apart so each lane replaces its own.
@@ -72,6 +73,11 @@ pub enum Cmd {
     Measure(Vec<crate::storage::Target>),
     /// Delete a cleanup candidate.
     Delete(crate::cleanup::Finding),
+    Cordon {
+        node: String,
+        on: bool,
+    },
+    Drain(crate::nodeops::DrainPlan),
 }
 
 #[derive(Clone, Debug)]
@@ -296,6 +302,7 @@ impl Source {
                     storage: slow.storage.clone(),
                     costs: vec![],
                     cleanup: slow.cleanup.clone(),
+                    pdbs: slow.pdbs.clone(),
                     infra: Default::default(),
                     fetched_at: Instant::now(),
                     error: None,
@@ -309,6 +316,21 @@ impl Source {
             Source::Idle => Err("no cluster selected".into()),
             Source::Demo(sim) => Ok(sim.measure(targets)),
             Source::Kube { client, dry_run, .. } => crate::storage::measure(client, targets, *dry_run).await.map_err(|e| format!("{e:#}")),
+        }
+    }
+
+    async fn cordon(&mut self, node: &str, on: bool) -> Result<String, String> {
+        let what = format!("{} {node}", if on { "cordoned" } else { "uncordoned" });
+        match self {
+            Source::Idle => Err("no cluster selected".into()),
+            Source::Demo(sim) => {
+                sim.cordon(node, on);
+                Ok(format!("{what} (demo)"))
+            }
+            Source::Kube { client, dry_run, .. } => crate::nodeops::cordon(client, node, on, *dry_run)
+                .await
+                .map(|_| if *dry_run { format!("dry-run OK: {what}") } else { what })
+                .map_err(|e| format!("{e:#}")),
         }
     }
 
@@ -512,6 +534,32 @@ pub async fn run(
                             });
                         }
                     }
+                    Some(Cmd::Cordon { node, on }) => {
+                        let res = source.cordon(&node, on).await;
+                        if tx.send(Msg::ActionDone(res)).is_err() {
+                            return;
+                        }
+                        break;
+                    }
+                    Some(Cmd::Drain(plan)) => match &mut source {
+                        Source::Kube { client, dry_run, .. } => {
+                            // A drain waits on PodDisruptionBudgets for minutes: run it on the side.
+                            let (client, dry_run, tx) = (client.clone(), *dry_run, tx.clone());
+                            tokio::spawn(async move {
+                                let progress = |m: String| drop(tx.send(Msg::ActionDone(Ok(m))));
+                                progress(format!("draining {}…", plan.node));
+                                let res = crate::nodeops::drain(&client, &plan, dry_run, progress).await.map_err(|e| format!("{e:#}"));
+                                let _ = tx.send(Msg::ActionDone(res));
+                            });
+                        }
+                        Source::Demo(sim) => {
+                            let res = sim.drain(&plan);
+                            if tx.send(Msg::ActionDone(res)).is_err() {
+                                return;
+                            }
+                        }
+                        Source::Idle => {}
+                    },
                     Some(Cmd::Delete(finding)) => {
                         let res = source.delete(&finding).await;
                         source.wake();
@@ -550,6 +598,23 @@ pub async fn run(
             }
         }
     }
+}
+
+/// PodDisruptionBudgets with how many disruptions each allows right now.
+async fn pdbs(client: &Client) -> Result<Vec<crate::model::PdbInfo>> {
+    use k8s_openapi::api::policy::v1::PodDisruptionBudget;
+    let list =
+        Api::<PodDisruptionBudget>::all(client.clone()).list(&ListParams::default()).await.context("listing poddisruptionbudgets")?;
+    Ok(list
+        .items
+        .into_iter()
+        .map(|p| crate::model::PdbInfo {
+            namespace: p.metadata.namespace.unwrap_or_default(),
+            name: p.metadata.name.unwrap_or_default(),
+            selector: p.spec.and_then(|s| s.selector).and_then(|s| s.match_labels).unwrap_or_default(),
+            allowed: p.status.and_then(|s| s.disruptions_allowed).unwrap_or(0),
+        })
+        .collect())
 }
 
 /// Hetzner's bill from its API, AWS/GCP/Azure nodes priced from the providers' price lists.
@@ -609,6 +674,7 @@ fn node_info(node: Node) -> NodeInfo {
     let addresses = status.addresses.unwrap_or_default();
     let label = |keys: &[&str]| keys.iter().find_map(|k| labels.get(*k)).cloned().unwrap_or_default();
     NodeInfo {
+        unschedulable: node.spec.as_ref().and_then(|s| s.unschedulable).unwrap_or(false),
         name: node.metadata.name.unwrap_or_default(),
         ready,
         roles,
@@ -654,7 +720,12 @@ fn pod_info(pod: Pod) -> PodInfo {
                 .or_else(|| s.terminated.as_ref().and_then(|t| t.reason.clone()).filter(|r| r != "Completed"))
         })
         .or(status.reason);
+    let volumes = spec.volumes.clone().unwrap_or_default();
     PodInfo {
+        labels: pod.metadata.labels.clone().unwrap_or_default(),
+        host_path: volumes.iter().any(|v| v.host_path.is_some()),
+        empty_dir: volumes.iter().any(|v| v.empty_dir.is_some()),
+        mirror: pod.metadata.annotations.as_ref().is_some_and(|a| a.contains_key("kubernetes.io/config.mirror")),
         name: pod.metadata.name.unwrap_or_default(),
         namespace: pod.metadata.namespace.unwrap_or_default(),
         node: spec.node_name,
@@ -793,11 +864,17 @@ async fn slow_loop(client: Client, shared: Shared, wake: Arc<Notify>) {
             };
             // Cleanup candidates build on the traffic and storage data just fetched.
             let found = tokio::time::timeout(limit, crate::cleanup::scan(&client, &net, &storage)).await;
+            let pdbs = tokio::time::timeout(limit, pdbs(&client)).await;
             let mut st = shared.lock().unwrap();
             match found {
                 Ok(Ok(f)) => st.cleanup = f,
                 Ok(Err(e)) => st.errors.push(lane_error("OpsList", "cleanup", format!("{e:#}"))),
                 Err(_) => st.errors.push(lane_error("OpsList", "cleanup", "timed out after 90s".into())),
+            }
+            match pdbs {
+                Ok(Ok(p)) => st.pdbs = p,
+                Ok(Err(e)) => st.errors.push(lane_error("OpsList", "poddisruptionbudgets", format!("{e:#}"))),
+                Err(_) => st.errors.push(lane_error("OpsList", "poddisruptionbudgets", "timed out after 90s".into())),
             }
         }
         tokio::select! {

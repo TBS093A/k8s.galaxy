@@ -189,6 +189,21 @@ Flagged (and sent to the warnings ticker): Pending claims, Lost/Failed volumes, 
 data, `hostPath` volumes without node affinity (a pod moved to another node sees an empty directory), volumes
 ≥ 85 % / 95 % full, a node filesystem filling up.
 
+## Node maintenance
+
+On the node list, `C` cordons or uncordons the selected node and `D` drains it: cordon, then every pod is
+evicted through the Eviction API, which honours PodDisruptionBudgets (refused evictions are retried for 5
+minutes), like `kubectl drain`. DaemonSet and static pods stay. The confirmation shows the plan first:
+
+- pods a PodDisruptionBudget will hold (it allows 0 disruptions now);
+- pods whose data is on this node's disk — pinned by node affinity they stay Pending until you uncordon,
+  without affinity they start elsewhere with an empty directory;
+- pods without a controller (deleted for good), emptyDir data that is lost;
+- a control-plane node, no other schedulable node, or not enough requested room on the other nodes.
+
+Cordoned nodes are marked `⊘` in the list. `--dry-run` validates the cordon and every eviction without
+changing anything; `--read-only` disables node actions.
+
 ## Costs
 
 The header shows what the cluster costs per month, each node's details its instance type and hourly price, and
@@ -228,7 +243,7 @@ watch streams into local caches: the API server sends only changes. Traffic, RBA
 
 ## Keys
 
-`1-9`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `m` measure volumes (storage view) · `d` delete (cleanup view) · `c` clusters · `$` costs · `r` refresh now · `q` quit
+`1-9`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `C`/`D` cordon/drain node · `m` measure volumes (storage view) · `d` delete (cleanup view) · `c` clusters · `$` costs · `r` refresh now · `q` quit
 
 ## Layout
 
@@ -249,6 +264,7 @@ src/
   cloudprice.rs  AWS, GCP and Azure on-demand prices for nodes, volumes, control planes
   cleanup.rs  leftover detection and deletes
   watch.rs    watch streams + reflector caches for the live lists
+  nodeops.rs  cordon, drain plan (PDBs, node-local data, bare pods, room) and evictions
   storage.rs  PV/PVC/StorageClass, in-cluster vs external, kubelet volume stats, du measurement
   ops.rs      rollouts, traffic (Ingress/Gateway API/cert-manager), RBAC, rollout actions
   demo_ops.rs simulated rollouts/traffic/RBAC for --demo
@@ -256,7 +272,7 @@ src/
   ui/         map, galaxy, radar, panels, ops (rollouts/net/rbac/argo views), cluster picker
 ```
 
-RBAC needed: `list` on nodes, pods, events, deployments, replicasets, daemonsets, statefulsets (cluster-wide), `get` on `pods/log`, `list` on secrets for the Helm tab (releases are read from `owner=helm` Secrets; without access the tab shows a warning and stays empty). The operations views add `list` on ingresses, services, endpointslices, roles, rolebindings, clusterroles, clusterrolebindings, serviceaccounts, Gateway API / cert-manager / Argo Rollouts objects, Argo CD `applications` (+ `patch` for sync/refresh), `nodes`/`pods` in `metrics.k8s.io`, and `patch` on the workloads (plus `rollouts/status`) for actions. Storage needs `list` on persistentvolumes, persistentvolumeclaims, storageclasses, `get` on `nodes/proxy` (kubelet stats), and `create`/`delete` pods in `default` for measuring.
+RBAC needed (all optional except nodes and pods; missing ones just leave a view empty): `list` on nodes, pods, events, deployments, replicasets, daemonsets, statefulsets (cluster-wide), `get` on `pods/log`, `list` on secrets for the Helm tab (releases are read from `owner=helm` Secrets; without access the tab shows a warning and stays empty). The operations views add `list` on ingresses, services, endpointslices, roles, rolebindings, clusterroles, clusterrolebindings, serviceaccounts, Gateway API / cert-manager / Argo Rollouts objects, Argo CD `applications` (+ `patch` for sync/refresh), `nodes`/`pods` in `metrics.k8s.io`, and `patch` on the workloads (plus `rollouts/status`) for actions. Storage needs `list` on persistentvolumes, persistentvolumeclaims, storageclasses, `get` on `nodes/proxy` (kubelet stats), and `create`/`delete` pods in `default` for measuring.
 
 ## Development
 

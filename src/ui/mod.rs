@@ -44,6 +44,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.costs_open {
         costs::draw(f, area, app);
     }
+    // Confirmations come from every view (node actions from the map, rollouts from 4…).
+    if app.confirm.is_some() {
+        ops::confirm(f, area, app);
+    }
     if app.picker.is_some() {
         picker::draw(f, area, app);
     }

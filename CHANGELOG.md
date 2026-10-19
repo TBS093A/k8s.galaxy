@@ -22,6 +22,8 @@ under a dated heading, `## X.Y.Z - YYYY-MM-DD` (checked by the release workflow)
 - CPU/memory from metrics-server, requests vs allocatable without it.
 - Cluster picker for every kubeconfig in `~/.kube` and `$KUBECONFIG`, with infrastructure
   detection (managed EKS/GKE/AKS/…, cloud VMs, bare metal, local, hybrid) and the distribution.
+- Node maintenance: cordon/uncordon and drain (Eviction API, PodDisruptionBudgets honoured) with a
+  plan of what happens to each pod — PDB holds, node-local data, bare pods, emptyDir, room elsewhere.
 - Costs in the header, per node and in a `$` window: the Hetzner Cloud bill from its API (uptime, cost
   since up, cost with the servers deleted), and on-demand prices for AWS, GCP and Azure nodes, volumes
   and managed control planes.

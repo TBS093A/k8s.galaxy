@@ -35,6 +35,7 @@ struct DemoNode {
     zone: &'static str,
     control_plane: bool,
     ready: bool,
+    cordoned: bool,
 }
 
 pub struct Sim {
@@ -86,13 +87,13 @@ const APPS: &[(&str, &str, usize)] = &[
 impl Sim {
     pub fn new() -> Self {
         let nodes = vec![
-            DemoNode { name: "cp-fsn1-1", location: "fsn1", zone: "fsn1-dc14", control_plane: true, ready: true },
-            DemoNode { name: "worker-fsn1-1", location: "fsn1", zone: "fsn1-dc14", control_plane: false, ready: true },
-            DemoNode { name: "worker-nbg1-1", location: "nbg1", zone: "nbg1-dc3", control_plane: false, ready: true },
-            DemoNode { name: "worker-hel1-1", location: "hel1", zone: "hel1-dc2", control_plane: false, ready: true },
-            DemoNode { name: "edge-ash-1", location: "ash", zone: "ash-dc1", control_plane: false, ready: true },
-            DemoNode { name: "homelab-waw-1", location: "waw", zone: "", control_plane: false, ready: true },
-            DemoNode { name: "homelab-waw-2", location: "waw", zone: "", control_plane: false, ready: true },
+            DemoNode { name: "cp-fsn1-1", location: "fsn1", zone: "fsn1-dc14", control_plane: true, ready: true, cordoned: false },
+            DemoNode { name: "worker-fsn1-1", location: "fsn1", zone: "fsn1-dc14", control_plane: false, ready: true, cordoned: false },
+            DemoNode { name: "worker-nbg1-1", location: "nbg1", zone: "nbg1-dc3", control_plane: false, ready: true, cordoned: false },
+            DemoNode { name: "worker-hel1-1", location: "hel1", zone: "hel1-dc2", control_plane: false, ready: true, cordoned: false },
+            DemoNode { name: "edge-ash-1", location: "ash", zone: "ash-dc1", control_plane: false, ready: true, cordoned: false },
+            DemoNode { name: "homelab-waw-1", location: "waw", zone: "", control_plane: false, ready: true, cordoned: false },
+            DemoNode { name: "homelab-waw-2", location: "waw", zone: "", control_plane: false, ready: true, cordoned: false },
         ];
         let mut rng = Rng::new(0x6a1a_c7c5);
         let mut pods = vec![];
@@ -111,6 +112,11 @@ impl Sim {
                     containers: vec![app.into()],
                     owner: Some(owner_name(app, kind_of(app, replicas, nodes.len()))),
                     requests: requests_of(app),
+                    labels: [("app".to_string(), app.to_string())].into(),
+                    // Stateful demo apps keep their data on the node's disk, like the hostPath PVs.
+                    host_path: matches!(app, "prometheus" | "postgres" | "loki"),
+                    empty_dir: matches!(app, "grafana" | "docker-builder"),
+                    mirror: false,
                 });
             }
         }
@@ -124,6 +130,38 @@ impl Sim {
 
     pub fn perform_app(&mut self, namespace: &str, name: &str, action: crate::gitops::AppAction) -> Result<(), String> {
         self.ops.perform_app(namespace, name, action)
+    }
+
+    pub fn cordon(&mut self, node: &str, on: bool) {
+        if let Some(n) = self.nodes.iter_mut().find(|n| n.name == node) {
+            n.cordoned = on;
+        }
+    }
+
+    /// Cordon and move the evictable pods to other schedulable nodes; PDBs that allow nothing hold theirs.
+    pub fn drain(&mut self, plan: &crate::nodeops::DrainPlan) -> Result<String, String> {
+        self.cordon(&plan.node, true);
+        let targets: Vec<&'static str> =
+            self.nodes.iter().filter(|n| n.name != plan.node && n.ready && !n.cordoned).map(|n| n.name).collect();
+        if targets.is_empty() {
+            return Err(format!("no other schedulable node for the pods of {}", plan.node));
+        }
+        let held: Vec<String> = vec!["checkout-api".into()];
+        let (mut moved, mut blocked) = (0, 0);
+        for (ns, name) in &plan.evict {
+            let Some(p) = self.pods.iter_mut().find(|p| &p.namespace == ns && &p.name == name) else { continue };
+            if p.labels.get("app").is_some_and(|a| held.contains(a)) {
+                blocked += 1;
+                continue;
+            }
+            p.node = Some(targets[(crate::fx::hash(name) as usize) % targets.len()].into());
+            moved += 1;
+        }
+        if blocked > 0 {
+            Err(format!("drained {} partly: {moved} evicted, {blocked} held by PodDisruptionBudget shop/checkout-api (demo)", plan.node))
+        } else {
+            Ok(format!("drained {}: {moved} pods evicted (demo)", plan.node))
+        }
     }
 
     pub fn delete(&mut self, f: &crate::cleanup::Finding) {
@@ -196,6 +234,7 @@ impl Sim {
                 NodeInfo {
                     name: n.name.into(),
                     ready: n.ready,
+                    unschedulable: n.cordoned,
                     roles: vec![if n.control_plane { "control-plane" } else { "worker" }.into()],
                     labels,
                     annotations: BTreeMap::new(),
@@ -240,6 +279,20 @@ impl Sim {
             metrics: Some(self.metrics()),
             storage: crate::demo_ops::demo_storage(),
             cleanup: self.ops.cleanup(),
+            pdbs: vec![
+                crate::model::PdbInfo {
+                    namespace: "shop".into(),
+                    name: "checkout-api".into(),
+                    selector: [("app".to_string(), "checkout-api".to_string())].into(),
+                    allowed: 0,
+                },
+                crate::model::PdbInfo {
+                    namespace: "ingress".into(),
+                    name: "ingress-nginx".into(),
+                    selector: [("app".to_string(), "ingress-nginx".to_string())].into(),
+                    allowed: 1,
+                },
+            ],
             costs: crate::demo_ops::demo_costs(),
             infra: Default::default(),
             helm: self.helm(),

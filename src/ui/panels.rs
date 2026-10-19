@@ -105,7 +105,11 @@ pub fn sidebar(f: &mut Frame, area: Rect, app: &App) {
             ListItem::new(Line::from(vec![
                 styled(glyph, health_rgb(n.health())),
                 Span::styled(format!("{:<20}", truncate(&n.name, 20)), Style::new().fg(fx::c((200, 220, 230)))),
-                styled(truncate(&n.place, 20), fx::STEEL),
+                if n.unschedulable {
+                    styled(format!("{} ⊘", truncate(&n.place, 17)), fx::AMBER)
+                } else {
+                    styled(truncate(&n.place, 20), fx::STEEL)
+                },
             ]))
         })
         .collect();
@@ -125,7 +129,14 @@ pub fn sidebar(f: &mut Frame, area: Rect, app: &App) {
             let warn = pods.iter().filter(|p| p.health() == Health::Warn).count();
             let kv = |k: &str, v: String| Line::from(vec![styled(format!("{k:<9}"), fx::STEEL), styled(v, (200, 220, 230))]);
             vec![
-                kv("status", if n.ready { "Ready".into() } else { "NotReady".into() }),
+                kv(
+                    "status",
+                    format!(
+                        "{}{}",
+                        if n.ready { "Ready" } else { "NotReady" },
+                        if n.unschedulable { " · cordoned (C uncordon)" } else { "" }
+                    ),
+                ),
                 kv("roles", n.roles.join(",")),
                 kv("place", n.place.clone()),
                 kv("region", format!("{} / {}", dash(&n.region), dash(&n.zone))),
@@ -327,6 +338,7 @@ pub fn footer(f: &mut Frame, area: Rect, app: &App) {
             ("t", "tab"),
             ("⏎", "details"),
             ("Esc", "map"),
+            ("C/D", "cordon·drain"),
             ("c", "clusters"),
             ("$", "costs"),
             ("r", "refresh"),

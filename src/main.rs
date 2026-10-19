@@ -16,6 +16,7 @@ mod infra;
 mod kubeconfigs;
 mod metrics;
 mod model;
+mod nodeops;
 mod ops;
 mod source;
 mod storage;
