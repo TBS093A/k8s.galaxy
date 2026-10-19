@@ -227,6 +227,8 @@ pub struct Snapshot {
     /// Hetzner Cloud bill, when a token is available.
     pub costs: Vec<crate::costs::Costs>,
     pub pdbs: Vec<PdbInfo>,
+    pub jobs: Vec<crate::jobs::JobInfo>,
+    pub cronjobs: Vec<crate::jobs::CronJobInfo>,
     pub fetched_at: Instant,
     pub error: Option<String>,
 }
@@ -251,6 +253,8 @@ impl Snapshot {
             cleanup: vec![],
             costs: vec![],
             pdbs: vec![],
+            jobs: vec![],
+            cronjobs: vec![],
             fetched_at: Instant::now(),
             error: None,
         }

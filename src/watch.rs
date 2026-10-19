@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{ControllerRevision, DaemonSet, Deployment, ReplicaSet, StatefulSet};
+use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{Event, Node, Pod};
 use k8s_openapi::serde::de::DeserializeOwned;
 use kube::runtime::reflector::{self, Store};
@@ -28,6 +29,8 @@ pub struct Watches {
     pub daemonsets: Store<DaemonSet>,
     pub statefulsets: Store<StatefulSet>,
     pub revisions: Store<ControllerRevision>,
+    pub jobs: Store<Job>,
+    pub cronjobs: Store<CronJob>,
     /// Latest error per resource (cleared by the next good event); the watch retries by itself.
     errors: Errors,
     _tasks: Vec<AbortOnDrop>,
@@ -70,6 +73,8 @@ impl Watches {
             daemonsets: watch(client, "daemonsets", &errors, &mut tasks),
             statefulsets: watch(client, "statefulsets", &errors, &mut tasks),
             revisions: watch(client, "controllerrevisions", &errors, &mut tasks),
+            jobs: watch(client, "jobs", &errors, &mut tasks),
+            cronjobs: watch(client, "cronjobs", &errors, &mut tasks),
             errors,
             _tasks: tasks,
         }

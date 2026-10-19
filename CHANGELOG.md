@@ -10,7 +10,10 @@ under a dated heading, `## X.Y.Z - YYYY-MM-DD` (checked by the release workflow)
 
 - Geo map, galaxy and radar views of nodes and pods; node locations from labels, zones and
   cloud provider APIs (Hetzner, AWS, GCP, Azure).
-- Resource list by namespace: pods, Deployments, ReplicaSets, DaemonSets, StatefulSets, Helm releases.
+- Resource list by namespace: pods, Deployments, ReplicaSets, DaemonSets, StatefulSets, Jobs, CronJobs,
+  Helm releases.
+- Jobs and CronJobs: status, duration, next run in the CronJob's time zone, missed/failed run warnings;
+  run a CronJob now, suspend/resume it, delete a Job.
 - Rollouts view (native and Argo Rollouts) with restart, pause/resume, rollback to any revision
   (StatefulSets and DaemonSets through ControllerRevisions), promote, abort, retry — with
   warnings before acting (Argo CD self-heal, rollbackWindow, skipped revisions).

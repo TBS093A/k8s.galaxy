@@ -255,6 +255,24 @@ fn resources(f: &mut Frame, area: Rect, app: &App) {
                         let state = if r.status == "deployed" { format!("r{}", r.revision) } else { r.status.clone() };
                         spans.push(styled(state, health_rgb(h)));
                     }
+                    Res::Job(j) => {
+                        spans.push(styled(format!("{:<19}", truncate(&j.name, 18)), text));
+                        spans.push(styled(format!("{:<9}", j.status.to_string()), health_rgb(h)));
+                        spans.push(styled(format!("{}/{}", j.succeeded, j.completions), fx::STEEL));
+                        if let Some(d) = j.duration_secs() {
+                            spans.push(styled(format!(" {}m{:02}s", d / 60, d % 60), (120, 150, 170)));
+                        }
+                    }
+                    Res::Cron(c) => {
+                        spans.push(styled(format!("{:<16}", truncate(&c.name, 15)), text));
+                        spans.push(styled(format!("{:<13}", truncate(&c.schedule, 12)), fx::STEEL));
+                        let when = if c.suspend {
+                            "suspended".to_string()
+                        } else {
+                            c.next.map(crate::jobs::until).unwrap_or_else(|| "—".into())
+                        };
+                        spans.push(styled(when, health_rgb(h)));
+                    }
                 }
                 ListItem::new(Line::from(spans))
             }
@@ -281,6 +299,8 @@ fn resources(f: &mut Frame, area: Rect, app: &App) {
     let enter = match app.res_kind {
         ResKind::Pods => "logs",
         ResKind::Helm => "info",
+        ResKind::Jobs => "info · d delete",
+        ResKind::CronJobs => "info · x run · s suspend",
         _ => "pods",
     };
     let block = Block::bordered()
@@ -290,7 +310,12 @@ fn resources(f: &mut Frame, area: Rect, app: &App) {
         .title_bottom(Line::from(styled(format!(" t kind · ⏎ {enter} · {scope} "), fx::STEEL)));
 
     if empty {
-        let msg = if app.res_kind == ResKind::Helm { "no Helm releases (or no access to secrets)" } else { "nothing here" };
+        let msg = match app.res_kind {
+            ResKind::Helm => "no Helm releases (or no access to secrets)",
+            ResKind::Jobs => "no Jobs",
+            ResKind::CronJobs => "no CronJobs",
+            _ => "nothing here",
+        };
         f.render_widget(Paragraph::new(styled(msg, fx::STEEL)).block(block), area);
         return;
     }

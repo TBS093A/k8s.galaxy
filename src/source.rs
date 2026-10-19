@@ -78,6 +78,12 @@ pub enum Cmd {
         on: bool,
     },
     Drain(crate::nodeops::DrainPlan),
+    /// Run a CronJob now, suspend/resume it, or delete a Job.
+    Job {
+        act: crate::app::JobAct,
+        namespace: String,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -238,6 +244,9 @@ impl Source {
                     items(&watches.statefulsets),
                     items(&watches.revisions),
                 );
+                let jobs: Vec<crate::jobs::JobInfo> = watches.jobs.state().iter().map(|j| crate::jobs::job_info(j)).collect();
+                let cronjobs: Vec<crate::jobs::CronJobInfo> =
+                    watches.cronjobs.state().iter().map(|c| crate::jobs::cronjob_info(c, &jobs)).collect();
                 let argo = match &rollout_crd {
                     Some(ar) => {
                         Api::<kube::api::DynamicObject>::all_with(client.clone(), ar).list(&lp).await.map(|l| l.items).unwrap_or_default()
@@ -285,6 +294,7 @@ impl Source {
                 );
                 warnings.splice(0..0, slow.live_errors.iter().cloned());
                 warnings.splice(0..0, cert_warnings(&slow.net));
+                warnings.splice(0..0, job_warnings(&jobs, &cronjobs));
                 warnings.splice(0..0, volume_warnings(&slow.storage));
                 Ok(Snapshot {
                     cluster: cluster.clone(),
@@ -303,6 +313,8 @@ impl Source {
                     costs: vec![],
                     cleanup: slow.cleanup.clone(),
                     pdbs: slow.pdbs.clone(),
+                    jobs,
+                    cronjobs,
                     infra: Default::default(),
                     fetched_at: Instant::now(),
                     error: None,
@@ -331,6 +343,38 @@ impl Source {
                 .await
                 .map(|_| if *dry_run { format!("dry-run OK: {what}") } else { what })
                 .map_err(|e| format!("{e:#}")),
+        }
+    }
+
+    async fn job_action(&mut self, act: crate::app::JobAct, ns: &str, name: &str) -> Result<String, String> {
+        use crate::app::JobAct;
+        match self {
+            Source::Idle => Err("no cluster selected".into()),
+            Source::Demo(sim) => match act {
+                JobAct::RunNow => sim.jobs.run_now(ns, name).map(|j| format!("started job {ns}/{j} (demo)")),
+                JobAct::Suspend(on) => {
+                    sim.jobs.suspend(ns, name, on);
+                    Ok(format!("{} cronjob {ns}/{name} (demo)", if on { "suspended" } else { "resumed" }))
+                }
+                JobAct::Delete => {
+                    sim.jobs.delete(ns, name);
+                    Ok(format!("deleted job {ns}/{name} (demo)"))
+                }
+            },
+            Source::Kube { client, dry_run, .. } => {
+                let dry = *dry_run;
+                let prefix = if dry { "dry-run OK: " } else { "" };
+                match act {
+                    JobAct::RunNow => crate::jobs::run_now(client, ns, name, dry).await.map(|j| format!("{prefix}started job {ns}/{j}")),
+                    JobAct::Suspend(on) => crate::jobs::suspend(client, ns, name, on, dry)
+                        .await
+                        .map(|_| format!("{prefix}{} cronjob {ns}/{name}", if on { "suspended" } else { "resumed" })),
+                    JobAct::Delete => {
+                        crate::jobs::delete_job(client, ns, name, dry).await.map(|_| format!("{prefix}deleted job {ns}/{name}"))
+                    }
+                }
+                .map_err(|e| format!("{e:#}"))
+            }
         }
     }
 
@@ -560,6 +604,14 @@ pub async fn run(
                         }
                         Source::Idle => {}
                     },
+                    Some(Cmd::Job { act, namespace, name }) => {
+                        let res = source.job_action(act, &namespace, &name).await;
+                        source.wake();
+                        if tx.send(Msg::ActionDone(res)).is_err() {
+                            return;
+                        }
+                        break;
+                    }
                     Some(Cmd::Delete(finding)) => {
                         let res = source.delete(&finding).await;
                         source.wake();
@@ -976,6 +1028,28 @@ fn volume_warnings(storage: &crate::storage::StorageInfo) -> Vec<EventInfo> {
             })
         })
         .collect()
+}
+
+/// Failed Jobs and CronJobs that fail or miss their schedule, as ticker warnings.
+fn job_warnings(jobs: &[crate::jobs::JobInfo], cronjobs: &[crate::jobs::CronJobInfo]) -> Vec<EventInfo> {
+    let mut out: Vec<EventInfo> = jobs
+        .iter()
+        .filter(|j| j.status == "Failed" && j.cronjob.is_none())
+        .map(|j| EventInfo {
+            reason: "JobFailed".into(),
+            object: format!("job/{}/{}", j.namespace, j.name),
+            message: j.message.clone(),
+            count: 1,
+        })
+        .collect();
+    for c in cronjobs {
+        if let Some((h, msg)) = c.problems().into_iter().next()
+            && h != crate::model::Health::Ok
+        {
+            out.push(EventInfo { reason: "CronJob".into(), object: format!("cronjob/{}/{}", c.namespace, c.name), message: msg, count: 1 });
+        }
+    }
+    out
 }
 
 /// Certificates that failed or are about to expire, as ticker warnings.

@@ -44,6 +44,7 @@ pub struct Sim {
     pods: Vec<PodInfo>,
     warnings: Vec<EventInfo>,
     ops: crate::demo_ops::OpsSim,
+    pub jobs: crate::demo_ops::JobSim,
     /// Per-pod load factor (usage / request), random-walked each step.
     load: BTreeMap<String, f64>,
 }
@@ -121,7 +122,7 @@ impl Sim {
             }
         }
         let load = pods.iter().map(|p| (p.name.clone(), 0.3 + crate::fx::unit(crate::fx::hash(&p.name)) * 0.7)).collect();
-        Self { rng, nodes, pods, warnings: vec![], ops: crate::demo_ops::OpsSim::new(), load }
+        Self { rng, nodes, pods, warnings: vec![], ops: crate::demo_ops::OpsSim::new(), jobs: crate::demo_ops::JobSim::new(), load }
     }
 
     pub fn perform(&mut self, action: &crate::ops::Action) -> Result<String, String> {
@@ -174,6 +175,7 @@ impl Sim {
 
     pub fn step(&mut self) {
         self.ops.step();
+        self.jobs.step();
         for v in self.load.values_mut() {
             *v = (*v + (self.rng.f64() - 0.5) * 0.25).clamp(0.05, 1.8);
         }
@@ -279,6 +281,8 @@ impl Sim {
             metrics: Some(self.metrics()),
             storage: crate::demo_ops::demo_storage(),
             cleanup: self.ops.cleanup(),
+            jobs: self.jobs.jobs.clone(),
+            cronjobs: self.jobs.cronjobs(),
             pdbs: vec![
                 crate::model::PdbInfo {
                     namespace: "shop".into(),

@@ -21,6 +21,8 @@ The resource list is split into namespace sections (with failing/degraded counts
 | --- | --- | --- |
 | `POD` | pods on the selected node | logs |
 | `DEP` `RS` `DS` `STS` | Deployments, ReplicaSets (scaled-to-0 ones hidden), DaemonSets, StatefulSets, cluster-wide, `ready/desired` | its pods with status, node, restarts |
+| `JOB` | Jobs cluster-wide: status, `succeeded/completions`, duration | completions, duration, the failure reason, its pods |
+| `CRON` | CronJobs: schedule, next run (in the CronJob's time zone) or suspended | schedule, next/last run, last success, problems, recent runs |
 | `HELM` | Helm 3 releases (current revision), chart, revision/status | chart, app version, status, workloads in its namespace |
 
 Selecting a workload or release highlights its pods in the Galaxy and Radar views.
@@ -39,6 +41,7 @@ Live Hetzner cluster unless marked *demo* (`--demo`, for what that cluster does 
 | ![Rollback: pick a revision](docs/screenshots/rollback-picker.png) **Rollback** — pick any kept revision | ![Rollback confirmation](docs/screenshots/rollback-confirm.png) **Rollback warnings** — Argo CD self-heal would undo it |
 | ![StatefulSet rollback](docs/screenshots/rollback-statefulset.png) **StatefulSet rollback** — via ControllerRevisions | ![Metrics](docs/screenshots/demo-metrics.png) **Metrics** (*demo*) — load arcs, a node running hot |
 | ![Storage](docs/screenshots/storage.png) **Storage** — map of node disks, Released volumes flagged | ![Storage, measured](docs/screenshots/demo-storage.png) **Storage** (*demo*) — in-cluster pools and external services linked to nodes |
+| ![CronJob](docs/screenshots/cronjobs.png) **CronJobs** (*demo*) — next run, failed last run, recent runs | |
 | ![Storage, measured on the nodes](docs/screenshots/storage-measured.png) **Storage, measured** — `m`: du on the nodes, volumes filled by usage | |
 
 ## Run
@@ -203,6 +206,16 @@ minutes), like `kubectl drain`. DaemonSet and static pods stay. The confirmation
 
 Cordoned nodes are marked `⊘` in the list. `--dry-run` validates the cordon and every eviction without
 changing anything; `--read-only` disables node actions.
+
+## Jobs and CronJobs
+
+The `JOB` and `CRON` tabs of the resource list show batch work. With a CronJob selected, `x` runs it now (a Job
+from its template, like `kubectl create job --from=cronjob/…`) and `s` suspends or resumes it; with a Job selected,
+`d` deletes it with its pods. Every action asks first and honours `--dry-run` / `--read-only`.
+
+The next run is computed from the schedule (lists, ranges, steps, names, `@daily`-style macros) in the CronJob's
+`timeZone`. The ticker warns about failed Jobs, CronJobs whose last run failed, that missed their schedule, or
+whose schedule cannot be parsed; suspended CronJobs are marked as such.
 
 ## Costs
 

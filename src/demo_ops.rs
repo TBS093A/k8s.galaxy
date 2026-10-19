@@ -1490,3 +1490,145 @@ pub fn demo_costs() -> Vec<crate::costs::Costs> {
     };
     vec![hetzner, aws]
 }
+
+use crate::jobs::{CronJobInfo, JobInfo};
+
+fn ago_ts(secs: i64) -> jiff::Timestamp {
+    jiff::Timestamp::from_second(jiff::Timestamp::now().as_second() - secs).unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn job(
+    ns: &str,
+    name: &str,
+    cron: Option<&str>,
+    status: &str,
+    done: i32,
+    of: i32,
+    started: i64,
+    took: Option<i64>,
+    message: &str,
+) -> JobInfo {
+    JobInfo {
+        namespace: ns.into(),
+        name: name.into(),
+        cronjob: cron.map(str::to_string),
+        status: status.into(),
+        active: if status == "Running" { 1 } else { 0 },
+        succeeded: done,
+        failed: if status == "Failed" { 6 } else { 0 },
+        completions: of,
+        started: Some(ago_ts(started)),
+        finished: took.map(|t| ago_ts(started - t)),
+        message: message.into(),
+    }
+}
+
+pub struct JobSim {
+    pub jobs: Vec<JobInfo>,
+    pub crons: Vec<(String, String, String, Option<String>, bool, i64)>, // ns, name, schedule, tz, suspend, last run (s ago)
+}
+
+impl JobSim {
+    pub fn new() -> Self {
+        let jobs = vec![
+            job("shop", "backup-postgres-29353500", Some("backup-postgres"), "Complete", 1, 1, 9 * 3600, Some(212), ""),
+            job("shop", "backup-postgres-29352060", Some("backup-postgres"), "Complete", 1, 1, 33 * 3600, Some(198), ""),
+            job(
+                "catalog",
+                "reindex-29354010",
+                Some("reindex"),
+                "Failed",
+                0,
+                1,
+                1500,
+                Some(410),
+                "BackoffLimitExceeded: Job has reached the specified backoff limit",
+            ),
+            job("catalog", "reindex-29353980", Some("reindex"), "Complete", 1, 1, 3300, Some(380), ""),
+            job("shop", "migrate-db-0ae9db8", None, "Complete", 1, 1, 6 * 86_400, Some(41), ""),
+            job(
+                "ci",
+                "seed-test-data",
+                None,
+                "Failed",
+                0,
+                1,
+                2 * 86_400,
+                Some(95),
+                "DeadlineExceeded: Job was active longer than specified deadline",
+            ),
+            job("search", "embeddings-backfill", None, "Running", 3, 8, 1800, None, ""),
+        ];
+        let crons = vec![
+            ("shop".into(), "backup-postgres".into(), "0 3 * * *".into(), Some("Europe/Warsaw".into()), false, 9 * 3600),
+            ("catalog".into(), "reindex".into(), "*/30 * * * *".into(), None, false, 1500),
+            ("monitoring".into(), "cert-check".into(), "@hourly".into(), None, true, 5 * 86_400),
+            ("ci".into(), "cleanup-images".into(), "0 4 * * 0".into(), None, false, 23 * 86_400),
+        ];
+        JobSim { jobs, crons }
+    }
+
+    pub fn cronjobs(&self) -> Vec<CronJobInfo> {
+        self.crons
+            .iter()
+            .map(|(ns, name, schedule, tz, suspend, last)| {
+                let newest =
+                    self.jobs.iter().filter(|j| &j.namespace == ns && j.cronjob.as_deref() == Some(name)).max_by_key(|j| j.started);
+                let mut c = CronJobInfo {
+                    namespace: ns.clone(),
+                    name: name.clone(),
+                    schedule: schedule.clone(),
+                    time_zone: tz.clone(),
+                    suspend: *suspend,
+                    active: self.jobs.iter().filter(|j| j.cronjob.as_deref() == Some(name) && j.status == "Running").count(),
+                    last_schedule: Some(ago_ts(*last)),
+                    last_success: self
+                        .jobs
+                        .iter()
+                        .filter(|j| j.cronjob.as_deref() == Some(name) && j.status == "Complete")
+                        .filter_map(|j| j.finished)
+                        .max()
+                        .or(Some(ago_ts(*last))),
+                    last_status: newest.map(|j| j.status.clone()),
+                    next: None,
+                };
+                if !c.suspend {
+                    c.next = crate::jobs::Cron::parse(&c.schedule).ok().and_then(|cr| cr.next_after(jiff::Timestamp::now(), &c.zone()));
+                }
+                c
+            })
+            .collect()
+    }
+
+    pub fn step(&mut self) {
+        // Manual runs finish after a little while.
+        for j in self.jobs.iter_mut().filter(|j| j.status == "Running" && j.name.contains("-manual-")) {
+            if j.duration_secs().unwrap_or(0) > 6 {
+                j.status = "Complete".into();
+                j.succeeded = j.completions;
+                j.active = 0;
+                j.finished = Some(jiff::Timestamp::now());
+            }
+        }
+    }
+
+    pub fn run_now(&mut self, ns: &str, cron: &str) -> Result<String, String> {
+        let name = format!("{cron}-manual-{}", jiff::Timestamp::now().as_second() % 1_000_000);
+        self.jobs.push(job(ns, &name, Some(cron), "Running", 0, 1, 0, None, ""));
+        if let Some(c) = self.crons.iter_mut().find(|c| c.0 == ns && c.1 == cron) {
+            c.5 = 0;
+        }
+        Ok(name)
+    }
+
+    pub fn suspend(&mut self, ns: &str, cron: &str, on: bool) {
+        if let Some(c) = self.crons.iter_mut().find(|c| c.0 == ns && c.1 == cron) {
+            c.4 = on;
+        }
+    }
+
+    pub fn delete(&mut self, ns: &str, name: &str) {
+        self.jobs.retain(|j| !(j.namespace == ns && j.name == name));
+    }
+}

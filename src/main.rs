@@ -13,6 +13,7 @@ mod fx;
 mod geo;
 mod gitops;
 mod infra;
+mod jobs;
 mod kubeconfigs;
 mod metrics;
 mod model;

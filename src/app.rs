@@ -205,6 +205,14 @@ pub enum Pending {
     Delete(crate::cleanup::Finding),
     Cordon { node: String, on: bool },
     Drain(crate::nodeops::DrainPlan),
+    Job { act: JobAct, namespace: String, name: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobAct {
+    RunNow,
+    Suspend(bool),
+    Delete,
 }
 
 impl Pending {
@@ -219,6 +227,17 @@ impl Pending {
             }
             Pending::Cordon { node, on } => (if *on { "CORDON" } else { "UNCORDON" }.into(), "Node", node.clone()),
             Pending::Drain(p) => ("DRAIN".into(), "Node", p.node.clone()),
+            Pending::Job { act, namespace, name } => (
+                match act {
+                    JobAct::RunNow => "RUN NOW",
+                    JobAct::Suspend(true) => "SUSPEND",
+                    JobAct::Suspend(false) => "RESUME",
+                    JobAct::Delete => "DELETE",
+                }
+                .into(),
+                if *act == JobAct::Delete { "Job" } else { "CronJob" },
+                format!("{namespace}/{name}"),
+            ),
             Pending::Delete(f) => {
                 ("DELETE".into(), f.kind, if f.namespace.is_empty() { f.name.clone() } else { format!("{}/{}", f.namespace, f.name) })
             }
@@ -233,6 +252,7 @@ impl Pending {
             Pending::Delete(_) => true,
             Pending::Cordon { .. } => false,
             Pending::Drain(_) => true,
+            Pending::Job { act, .. } => *act == JobAct::Delete,
         }
     }
 
@@ -246,6 +266,7 @@ impl Pending {
             Pending::Delete(f) => Cmd::Delete(f.clone()),
             Pending::Cordon { node, on } => Cmd::Cordon { node: node.clone(), on: *on },
             Pending::Drain(p) => Cmd::Drain(p.clone()),
+            Pending::Job { act, namespace, name } => Cmd::Job { act: *act, namespace: namespace.clone(), name: name.clone() },
         }
     }
 }
@@ -300,12 +321,22 @@ pub enum ResKind {
     ReplicaSets,
     DaemonSets,
     StatefulSets,
+    Jobs,
+    CronJobs,
     Helm,
 }
 
 impl ResKind {
-    pub const ALL: [ResKind; 6] =
-        [ResKind::Pods, ResKind::Deployments, ResKind::ReplicaSets, ResKind::DaemonSets, ResKind::StatefulSets, ResKind::Helm];
+    pub const ALL: [ResKind; 8] = [
+        ResKind::Pods,
+        ResKind::Deployments,
+        ResKind::ReplicaSets,
+        ResKind::DaemonSets,
+        ResKind::StatefulSets,
+        ResKind::Jobs,
+        ResKind::CronJobs,
+        ResKind::Helm,
+    ];
 
     pub fn short(self) -> &'static str {
         match self {
@@ -314,6 +345,8 @@ impl ResKind {
             ResKind::ReplicaSets => "RS",
             ResKind::DaemonSets => "DS",
             ResKind::StatefulSets => "STS",
+            ResKind::Jobs => "JOB",
+            ResKind::CronJobs => "CRON",
             ResKind::Helm => "HELM",
         }
     }
@@ -334,6 +367,8 @@ pub enum Res<'a> {
     Pod(&'a PodInfo),
     Workload(&'a WorkloadInfo),
     Helm(&'a HelmRelease),
+    Job(&'a crate::jobs::JobInfo),
+    Cron(&'a crate::jobs::CronJobInfo),
 }
 
 impl<'a> Res<'a> {
@@ -342,6 +377,8 @@ impl<'a> Res<'a> {
             Res::Pod(p) => &p.namespace,
             Res::Workload(w) => &w.namespace,
             Res::Helm(h) => &h.namespace,
+            Res::Job(j) => &j.namespace,
+            Res::Cron(c) => &c.namespace,
         }
     }
 
@@ -350,6 +387,8 @@ impl<'a> Res<'a> {
             Res::Pod(p) => &p.name,
             Res::Workload(w) => &w.name,
             Res::Helm(h) => &h.name,
+            Res::Job(j) => &j.name,
+            Res::Cron(c) => &c.name,
         }
     }
 
@@ -358,6 +397,8 @@ impl<'a> Res<'a> {
             Res::Pod(p) => p.health(),
             Res::Workload(w) => w.health(),
             Res::Helm(h) => h.health(),
+            Res::Job(j) => j.health(),
+            Res::Cron(c) => c.health(),
         }
     }
 }
@@ -568,6 +609,8 @@ impl App {
         let mut items: Vec<Res> = match self.res_kind {
             ResKind::Pods => self.selected_pods().into_iter().map(Res::Pod).collect(),
             ResKind::Helm => self.snap.helm.iter().map(Res::Helm).collect(),
+            ResKind::Jobs => self.snap.jobs.iter().map(Res::Job).collect(),
+            ResKind::CronJobs => self.snap.cronjobs.iter().map(Res::Cron).collect(),
             kind => {
                 let wk = kind.workload();
                 self.snap.workloads.iter().filter(|w| Some(w.kind) == wk && !w.is_stale()).map(Res::Workload).collect()
@@ -625,7 +668,56 @@ impl App {
             Some(Res::Helm(h)) => {
                 self.snap.pods.iter().filter(|p| p.namespace == h.namespace).map(|p| (p.namespace.as_str(), p.name.as_str())).collect()
             }
+            Some(Res::Job(j)) => {
+                self.job_pods(&j.namespace, &j.name).into_iter().map(|p| (p.namespace.as_str(), p.name.as_str())).collect()
+            }
+            Some(Res::Cron(c)) => self
+                .snap
+                .jobs
+                .iter()
+                .filter(|j| j.namespace == c.namespace && j.cronjob.as_deref() == Some(&c.name))
+                .flat_map(|j| self.job_pods(&j.namespace, &j.name))
+                .map(|p| (p.namespace.as_str(), p.name.as_str()))
+                .collect(),
         }
+    }
+
+    fn job_pods(&self, ns: &str, job: &str) -> Vec<&PodInfo> {
+        self.snap.pods.iter().filter(|p| p.namespace == ns && p.owner.as_ref().is_some_and(|(k, n)| k == "Job" && n == job)).collect()
+    }
+
+    /// `x` (run now), `s` (suspend/resume) on a CronJob, `d` (delete) on a Job.
+    fn request_job_action(&mut self, key: char) {
+        let pending = match (self.selected_res(), key) {
+            (Some(Res::Cron(c)), 'x') => (
+                JobAct::RunNow,
+                c.namespace.clone(),
+                c.name.clone(),
+                "creates a Job from its template now (kubectl create job --from=cronjob/…)".to_string(),
+            ),
+            (Some(Res::Cron(c)), 's') => {
+                let act = JobAct::Suspend(!c.suspend);
+                let what = if c.suspend { "resumes the schedule" } else { "stops new runs (running Jobs continue)" };
+                (act, c.namespace.clone(), c.name.clone(), what.to_string())
+            }
+            (Some(Res::Job(j)), 'd') => {
+                (JobAct::Delete, j.namespace.clone(), j.name.clone(), "deletes the Job and its pods (and their logs)".to_string())
+            }
+            _ => return,
+        };
+        if self.read_only {
+            self.toast = Some(Toast { text: "read-only mode (--read-only): actions disabled".into(), ok: false, at: Instant::now() });
+            return;
+        }
+        let (act, namespace, name, explain) = pending;
+        let mut warnings = vec![];
+        if act == JobAct::RunNow
+            && let Some(Res::Cron(c)) = self.selected_res()
+            && c.active > 0
+        {
+            warnings.push((Health::Warn, format!("{} run(s) already active — check its concurrencyPolicy", c.active)));
+        }
+        self.confirm = Some(Confirm { pending: Pending::Job { act, namespace, name }, explain, warnings });
     }
 
     /// Entries of the current operations view, grouped (sorted) by section, worst health first.
@@ -1306,6 +1398,7 @@ impl App {
             KeyCode::Char('-') => self.zoom_by(1.0 / 1.6),
             KeyCode::Char('0') => self.cam_target = Camera::WORLD,
             KeyCode::Char('f') => self.fit(),
+            KeyCode::Char(c @ ('x' | 's' | 'd')) if self.focus == Focus::Resources => self.request_job_action(c),
             KeyCode::Char('C') if self.focus == Focus::Nodes => self.request_cordon(),
             KeyCode::Char('D') if self.focus == Focus::Nodes => self.request_drain(),
             KeyCode::Char('H') => self.pan(-1.0, 0.0),
@@ -1340,6 +1433,63 @@ impl App {
                     format!("  {:<20} {:<52} {:<16} r:{}", p.status(), p.name, p.node.as_deref().unwrap_or("<unscheduled>"), p.restarts)
                 }));
                 (format!("{} {}", w.kind.as_str(), w.name), lines)
+            }
+            Some(Res::Job(j)) => {
+                let pods = self.job_pods(&j.namespace, &j.name);
+                let dur = j.duration_secs().map(|d| format!("{}m {}s", d / 60, d % 60)).unwrap_or_else(|| "—".into());
+                let mut lines = vec![
+                    format!("Job {}/{}", j.namespace, j.name),
+                    format!("status       {}", j.status),
+                    format!("completions  {}/{}  active {}  failed {}", j.succeeded, j.completions, j.active, j.failed),
+                    format!("started      {}", j.started.map(|t| format!("{} ago", crate::ops::ago(t))).unwrap_or_else(|| "—".into())),
+                    format!("duration     {dur}"),
+                ];
+                if let Some(c) = &j.cronjob {
+                    lines.push(format!("cronjob      {c}"));
+                }
+                if !j.message.is_empty() {
+                    lines.push(format!("error        {}", j.message));
+                }
+                lines.push(String::new());
+                lines.push(format!("{} pods (select it in POD on its node for logs)", pods.len()));
+                lines.extend(
+                    pods.iter().map(|p| format!("  {:<20} {:<52} {}", p.status(), p.name, p.node.as_deref().unwrap_or("<unscheduled>"))),
+                );
+                lines.push(String::new());
+                lines.push("d deletes the Job (asks first)".into());
+                (format!("Job {}", j.name), lines)
+            }
+            Some(Res::Cron(c)) => {
+                let fmt = |t: Option<jiff::Timestamp>| t.map(|t| format!("{} ago", crate::ops::ago(t))).unwrap_or_else(|| "never".into());
+                let mut lines = vec![
+                    format!("CronJob {}/{}", c.namespace, c.name),
+                    format!("schedule     {}{}", c.schedule, c.time_zone.as_ref().map(|z| format!("  ({z})")).unwrap_or_default()),
+                    format!("state        {}", if c.suspend { "suspended" } else { "active" }),
+                    format!(
+                        "next run     {}",
+                        c.next
+                            .map(|t| format!("{} ({})", crate::jobs::until(t), t.strftime("%Y-%m-%d %H:%M UTC")))
+                            .unwrap_or_else(|| "—".into())
+                    ),
+                    format!("last run     {}", fmt(c.last_schedule)),
+                    format!("last success {}", fmt(c.last_success)),
+                    format!("running now  {}", c.active),
+                ];
+                for (_, p) in c.problems() {
+                    lines.push(format!("note         {p}"));
+                }
+                lines.push(String::new());
+                let mut runs: Vec<_> =
+                    self.snap.jobs.iter().filter(|j| j.namespace == c.namespace && j.cronjob.as_deref() == Some(&c.name)).collect();
+                runs.sort_by_key(|j| std::cmp::Reverse(j.started));
+                lines.push(format!("{} recent runs", runs.len()));
+                lines.extend(runs.iter().map(|j| {
+                    let d = j.duration_secs().map(|d| format!("{}m{:02}s", d / 60, d % 60)).unwrap_or_default();
+                    format!("  {:<10} {:<44} {:>8}  {}", j.status, j.name, d, j.started.map(crate::ops::ago).unwrap_or_default())
+                }));
+                lines.push(String::new());
+                lines.push("x runs it now · s suspends/resumes (both ask first)".into());
+                (format!("CronJob {}", c.name), lines)
             }
             Some(Res::Helm(h)) => {
                 let ns_pods: Vec<_> = self.snap.pods.iter().filter(|p| p.namespace == h.namespace).collect();
