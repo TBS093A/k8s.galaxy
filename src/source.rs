@@ -1,0 +1,654 @@
+//! Background data feed: polls the cluster (or the demo simulator) and pushes snapshots to the UI.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, ReplicaSet, StatefulSet};
+use k8s_openapi::api::core::v1::{Event, Node, Pod, PodSpec, Secret};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use kube::api::{ListParams, LogParams};
+use kube::config::{KubeConfigOptions, Kubeconfig};
+use kube::{Api, Client, Config};
+use tokio::sync::Notify;
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use crate::cloud::{self, CloudConfig, CloudInstance};
+use crate::demo::Sim;
+use crate::geo::Resolver;
+use crate::gitops::{self, AppAction, AppInfo};
+use crate::metrics::{self, Metrics, Usage};
+use crate::ops::{self, Action, Crds, NetInfo, RbacInfo};
+use crate::model::{EventInfo, HelmRelease, NodeInfo, PodInfo, Snapshot, WorkloadInfo, WorkloadKind};
+
+/// Traffic, RBAC and Helm change rarely and are bigger lists: they refresh in a background task
+/// on this clock, so a slow API server never holds up the live view.
+const SLOW_INTERVAL: Duration = Duration::from_secs(20);
+/// Argo CD Applications and metrics: same background task, faster clock (sync status should move quickly).
+const LIVE_INTERVAL: Duration = Duration::from_secs(5);
+/// Optional CRDs (Argo Rollouts, Gateway API, cert-manager) can be installed while we run.
+const DISCOVERY_INTERVAL: Duration = Duration::from_secs(300);
+
+/// What the background task last fetched.
+#[derive(Default)]
+pub struct SlowState {
+    net: NetInfo,
+    rbac: RbacInfo,
+    helm: Vec<HelmRelease>,
+    apps: Vec<AppInfo>,
+    metrics: Option<Metrics>,
+    /// Errors of the 20 s lane and of the 5 s lane (apps, metrics), kept apart so each lane replaces its own.
+    errors: Vec<EventInfo>,
+    live_errors: Vec<EventInfo>,
+    crds: Crds,
+}
+
+type Shared = Arc<Mutex<SlowState>>;
+
+pub enum Cmd {
+    Refresh,
+    Action(Action),
+    AppAction { namespace: String, name: String, action: AppAction },
+    Logs { namespace: String, pod: String, container: Option<String> },
+}
+
+pub enum Msg {
+    Snapshot(Box<Snapshot>),
+    ActionDone(Result<String, String>),
+    Logs { title: String, lines: Result<Vec<String>, String> },
+}
+
+#[allow(clippy::large_enum_variant)] // one long-lived value
+pub enum Source {
+    Kube { client: Client, cluster: String, slow: Shared, wake: Arc<Notify>, dry_run: bool },
+    Demo(Sim),
+}
+
+impl Source {
+    pub async fn connect(kubeconfig: Option<PathBuf>, context: Option<String>) -> Result<Self> {
+        let kc = match &kubeconfig {
+            Some(path) => Kubeconfig::read_from(path).with_context(|| format!("reading {}", path.display()))?,
+            None => Kubeconfig::read().context("reading kubeconfig ($KUBECONFIG / ~/.kube/config)")?,
+        };
+        let cluster = context
+            .clone()
+            .or_else(|| kc.current_context.clone())
+            .or_else(|| kc.contexts.first().map(|c| c.name.clone()))
+            .unwrap_or_else(|| "cluster".into());
+        let opts = KubeConfigOptions { context: Some(cluster.clone()), ..Default::default() };
+        let config = Config::from_custom_kubeconfig(kc, &opts).await.context("building kube config")?;
+        let client = Client::try_from(config)?;
+        let slow = Shared::default();
+        let wake = Arc::new(Notify::new());
+        tokio::spawn(slow_loop(client.clone(), slow.clone(), wake.clone()));
+        Ok(Source::Kube { client, cluster, slow, wake, dry_run: false })
+    }
+
+    pub fn cluster(&self) -> String {
+        match self {
+            Source::Kube { cluster, .. } => cluster.clone(),
+            Source::Demo(_) => "demo-galaxy".into(),
+        }
+    }
+
+    async fn snapshot(&mut self) -> Result<Snapshot> {
+        match self {
+            Source::Demo(sim) => {
+                sim.step();
+                Ok(sim.snapshot())
+            }
+            Source::Kube { client, cluster, slow, .. } => {
+                let rollout_crd = slow.lock().unwrap().crds.rollout.clone();
+                let lp = ListParams::default();
+                let (node_api, pod_api, event_api) = (
+                    Api::<Node>::all(client.clone()),
+                    Api::<Pod>::all(client.clone()),
+                    Api::<Event>::all(client.clone()),
+                );
+                let (dep_api, rs_api, ds_api, sts_api) = (
+                    Api::<Deployment>::all(client.clone()),
+                    Api::<ReplicaSet>::all(client.clone()),
+                    Api::<DaemonSet>::all(client.clone()),
+                    Api::<StatefulSet>::all(client.clone()),
+                );
+                let (nodes, pods, events, deps, rss, dss, stss) = tokio::try_join!(
+                    node_api.list(&lp),
+                    pod_api.list(&lp),
+                    event_api.list(&lp),
+                    dep_api.list(&lp),
+                    rs_api.list(&lp),
+                    ds_api.list(&lp),
+                    sts_api.list(&lp),
+                )?;
+                let argo = match &rollout_crd {
+                    Some(ar) => Api::<kube::api::DynamicObject>::all_with(client.clone(), ar).list(&lp).await.map(|l| l.items).unwrap_or_default(),
+                    None => vec![],
+                };
+                let rollouts = ops::rollouts(&deps.items, &rss.items, &stss.items, &dss.items, &argo);
+                let mut workloads = vec![];
+                for d in deps.items {
+                    let s = d.status.unwrap_or_default();
+                    let desired = d.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+                    let image = first_image(d.spec.map(|s| s.template.spec));
+                    workloads.push(workload(WorkloadKind::Deployment, d.metadata, desired, s.ready_replicas.unwrap_or(0), image));
+                }
+                for r in rss.items {
+                    let s = r.status.unwrap_or_default();
+                    let desired = r.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+                    let image = first_image(r.spec.and_then(|s| s.template).map(|t| t.spec));
+                    workloads.push(workload(WorkloadKind::ReplicaSet, r.metadata, desired, s.ready_replicas.unwrap_or(0), image));
+                }
+                for d in dss.items {
+                    let s = d.status.unwrap_or_default();
+                    let image = first_image(d.spec.map(|s| s.template.spec));
+                    workloads.push(workload(WorkloadKind::DaemonSet, d.metadata, s.desired_number_scheduled, s.number_ready, image));
+                }
+                for st in stss.items {
+                    let s = st.status.unwrap_or_default();
+                    let desired = st.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
+                    let image = first_image(st.spec.map(|s| s.template.spec));
+                    workloads.push(workload(WorkloadKind::StatefulSet, st.metadata, desired, s.ready_replicas.unwrap_or(0), image));
+                }
+                let mut warnings: Vec<_> = events
+                    .items
+                    .into_iter()
+                    .filter(|e| e.type_.as_deref() == Some("Warning"))
+                    .collect();
+                warnings.sort_by_key(|e| std::cmp::Reverse(e.last_timestamp.as_ref().map(|t| t.0.to_string())));
+                let mut warnings: Vec<EventInfo> = warnings.into_iter().take(50).map(event_info).collect();
+                let slow = slow.lock().unwrap();
+                warnings.splice(0..0, slow.errors.iter().cloned());
+                warnings.splice(0..0, slow.live_errors.iter().cloned());
+                warnings.splice(0..0, cert_warnings(&slow.net));
+                Ok(Snapshot {
+                    cluster: cluster.clone(),
+                    nodes: nodes.items.into_iter().map(node_info).collect(),
+                    pods: pods.items.into_iter().map(pod_info).collect(),
+                    warnings,
+                    workloads,
+                    helm: slow.helm.clone(),
+                    rollouts,
+                    net: slow.net.clone(),
+                    rbac: slow.rbac.clone(),
+                    caps: slow.crds.caps(),
+                    apps: slow.apps.clone(),
+                    metrics: slow.metrics.clone(),
+                    fetched_at: Instant::now(),
+                    error: None,
+                })
+            }
+        }
+    }
+
+    fn wake(&self) {
+        if let Source::Kube { wake, .. } = self {
+            wake.notify_one();
+        }
+    }
+
+    async fn perform_app(&mut self, namespace: &str, name: &str, action: AppAction) -> Result<String, String> {
+        let done = format!("{} Application {namespace}/{name}", action.label());
+        match self {
+            Source::Demo(sim) => sim.perform_app(namespace, name, action).map(|_| format!("{done} (demo)")),
+            Source::Kube { client, slow, dry_run, .. } => {
+                let ar = slow.lock().unwrap().crds.application.clone().ok_or("Argo CD Application CRD not found")?;
+                gitops::perform(client, &ar, namespace, name, action, *dry_run)
+                    .await
+                    .map(|_| if *dry_run { format!("dry-run OK: {done}") } else { done })
+                    .map_err(|e| format!("{e:#}"))
+            }
+        }
+    }
+
+    pub fn set_dry_run(&mut self, on: bool) {
+        if let Source::Kube { dry_run, .. } = self {
+            *dry_run = on;
+        }
+    }
+
+    async fn perform(&mut self, action: &Action) -> Result<String, String> {
+        match self {
+            Source::Demo(sim) => sim.perform(action),
+            Source::Kube { client, slow, dry_run, .. } => {
+                let crds = slow.lock().unwrap().crds.clone();
+                ops::perform(client, &crds, action, *dry_run).await.map_err(|e| format!("{e:#}"))
+            }
+        }
+    }
+
+    async fn logs(&self, namespace: &str, pod: &str, container: Option<String>) -> Result<Vec<String>, String> {
+        match self {
+            Source::Demo(sim) => Ok(sim.logs(pod)),
+            Source::Kube { client, .. } => {
+                let params = LogParams { tail_lines: Some(500), container, ..Default::default() };
+                let text = Api::<Pod>::namespaced(client.clone(), namespace)
+                    .logs(pod, &params)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(text.lines().map(str::to_string).collect())
+            }
+        }
+    }
+}
+
+pub struct CloudPoll {
+    pub config: CloudConfig,
+    pub interval: Duration,
+}
+
+pub async fn run(
+    mut source: Source,
+    resolver: Resolver,
+    interval: Duration,
+    cloud_poll: CloudPoll,
+    mut cmds: UnboundedReceiver<Cmd>,
+    tx: Sender<Msg>,
+) {
+    let mut last_good: Option<Snapshot> = None;
+    let mut instances: Vec<CloudInstance> = vec![];
+    let mut cloud_errors: Vec<EventInfo> = vec![];
+    let mut cloud_at: Option<Instant> = None;
+    loop {
+        let snap = match tokio::time::timeout(Duration::from_secs(25), source.snapshot()).await {
+            Ok(Ok(mut snap)) => {
+                // Provider inventories change rarely; refresh them on their own, slower clock.
+                if cloud_at.is_none_or(|t| t.elapsed() >= cloud_poll.interval) {
+                    cloud_at = Some(Instant::now());
+                    let (list, errors) = cloud::inventory(&cloud_poll.config, &snap.nodes).await;
+                    instances = list;
+                    cloud_errors = errors
+                        .into_iter()
+                        .map(|(p, e)| EventInfo {
+                            reason: "CloudAPI".into(),
+                            object: format!("provider/{p}"),
+                            message: e.replace('\n', " "),
+                            count: 1,
+                        })
+                        .collect();
+                }
+                snap.warnings.splice(0..0, cloud_errors.iter().cloned());
+                snap.nodes.iter_mut().for_each(|n| resolver.apply(n, &instances));
+                snap.nodes.sort_by(|a, b| (&a.place, &a.name).cmp(&(&b.place, &b.name)));
+                last_good = Some(snap.clone());
+                snap
+            }
+            failure => {
+                let err = match failure {
+                    Ok(Err(e)) => format!("{e:#}"),
+                    _ => "timeout talking to API server".into(),
+                };
+                let mut snap = last_good.clone().unwrap_or_else(|| Snapshot::empty(source.cluster()));
+                snap.error = Some(err);
+                snap
+            }
+        };
+        if tx.send(Msg::Snapshot(Box::new(snap))).is_err() {
+            return;
+        }
+
+        // Wait for the next tick, serving commands meanwhile.
+        let deadline = tokio::time::Instant::now() + interval;
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => break,
+                cmd = cmds.recv() => match cmd {
+                    None => return,
+                    Some(Cmd::Refresh) => {
+                        source.wake();
+                        break;
+                    }
+                    Some(Cmd::AppAction { namespace, name, action }) => {
+                        let res = source.perform_app(&namespace, &name, action).await;
+                        source.wake();
+                        if tx.send(Msg::ActionDone(res)).is_err() {
+                            return;
+                        }
+                    }
+                    Some(Cmd::Action(action)) => {
+                        let res = source.perform(&action).await;
+                        if tx.send(Msg::ActionDone(res)).is_err() {
+                            return;
+                        }
+                        break;
+                    }
+                    Some(Cmd::Logs { namespace, pod, container }) => {
+                        let lines = source.logs(&namespace, &pod, container).await;
+                        let title = format!("{namespace}/{pod}");
+                        if tx.send(Msg::Logs { title, lines }).is_err() {
+                            return;
+                        }
+                    }
+                },
+            }
+        }
+    }
+}
+
+fn node_info(node: Node) -> NodeInfo {
+    let labels: BTreeMap<String, String> = node.metadata.labels.unwrap_or_default();
+    let annotations = node.metadata.annotations.unwrap_or_default();
+    let status = node.status.unwrap_or_default();
+    let ready = status
+        .conditions
+        .unwrap_or_default()
+        .iter()
+        .any(|c| c.type_ == "Ready" && c.status == "True");
+    let roles = labels
+        .keys()
+        .filter_map(|k| k.strip_prefix("node-role.kubernetes.io/"))
+        .map(str::to_string)
+        .collect();
+    let capacity = status.capacity.unwrap_or_default();
+    let alloc = status.allocatable.unwrap_or_default();
+    let allocatable = Usage {
+        cpu_m: alloc.get("cpu").map(|q| metrics::cpu_milli(&q.0)).unwrap_or(0),
+        mem: alloc.get("memory").map(|q| metrics::bytes(&q.0)).unwrap_or(0),
+    };
+    let addresses = status.addresses.unwrap_or_default();
+    let label = |keys: &[&str]| keys.iter().find_map(|k| labels.get(*k)).cloned().unwrap_or_default();
+    NodeInfo {
+        name: node.metadata.name.unwrap_or_default(),
+        ready,
+        roles,
+        region: label(&["topology.kubernetes.io/region", "failure-domain.beta.kubernetes.io/region"]),
+        zone: label(&["topology.kubernetes.io/zone", "failure-domain.beta.kubernetes.io/zone"]),
+        cpu: capacity.get("cpu").map(|q| q.0.clone()).unwrap_or_default(),
+        memory: capacity.get("memory").map(|q| human_bytes(&q.0)).unwrap_or_default(),
+        allocatable,
+        kubelet: status.node_info.map(|i| i.kubelet_version).unwrap_or_default(),
+        internal_ip: addresses
+            .iter()
+            .find(|a| a.type_ == "InternalIP")
+            .map(|a| a.address.clone())
+            .unwrap_or_default(),
+        provider_id: node.spec.and_then(|s| s.provider_id).unwrap_or_default(),
+        addresses: addresses.into_iter().map(|a| a.address).collect(),
+        cloud: None,
+        labels,
+        annotations,
+        geo: None,
+        place: String::new(),
+    }
+}
+
+fn pod_info(pod: Pod) -> PodInfo {
+    let owner = controller(&pod.metadata);
+    let spec = pod.spec.unwrap_or_default();
+    let mut requests = Usage::default();
+    for c in &spec.containers {
+        if let Some(req) = c.resources.as_ref().and_then(|r| r.requests.as_ref()) {
+            requests += Usage {
+                cpu_m: req.get("cpu").map(|q| metrics::cpu_milli(&q.0)).unwrap_or(0),
+                mem: req.get("memory").map(|q| metrics::bytes(&q.0)).unwrap_or(0),
+            };
+        }
+    }
+    let status = pod.status.unwrap_or_default();
+    let statuses = status.container_statuses.unwrap_or_default();
+    let reason = statuses
+        .iter()
+        .filter_map(|cs| cs.state.as_ref())
+        .find_map(|s| {
+            s.waiting
+                .as_ref()
+                .and_then(|w| w.reason.clone())
+                .or_else(|| s.terminated.as_ref().and_then(|t| t.reason.clone()).filter(|r| r != "Completed"))
+        })
+        .or(status.reason);
+    PodInfo {
+        name: pod.metadata.name.unwrap_or_default(),
+        namespace: pod.metadata.namespace.unwrap_or_default(),
+        node: spec.node_name,
+        phase: status.phase.unwrap_or_else(|| "Unknown".into()),
+        reason,
+        restarts: statuses.iter().map(|c| c.restart_count).sum(),
+        ready: !statuses.is_empty() && statuses.iter().all(|c| c.ready),
+        containers: spec.containers.into_iter().map(|c| c.name).collect(),
+        owner,
+        requests,
+    }
+}
+
+fn event_info(e: Event) -> EventInfo {
+    let o = e.involved_object;
+    EventInfo {
+        reason: e.reason.unwrap_or_default(),
+        object: format!(
+            "{}/{}",
+            o.kind.unwrap_or_default().to_lowercase(),
+            o.name.unwrap_or_default()
+        ),
+        message: e.message.unwrap_or_default().replace('\n', " "),
+        count: e.count.unwrap_or(1),
+    }
+}
+
+/// `7927612Ki` -> `7.6Gi`; anything unparseable is passed through.
+fn human_bytes(q: &str) -> String {
+    let units = [("Ki", 1u64 << 10), ("Mi", 1 << 20), ("Gi", 1 << 30), ("Ti", 1 << 40)];
+    let (num, mult) = units
+        .iter()
+        .find_map(|(s, m)| q.strip_suffix(s).map(|n| (n, *m)))
+        .unwrap_or((q, 1));
+    match num.parse::<f64>() {
+        Ok(n) => format!("{:.1}Gi", n * mult as f64 / (1u64 << 30) as f64),
+        Err(_) => q.to_string(),
+    }
+}
+
+fn controller(meta: &ObjectMeta) -> Option<(String, String)> {
+    meta.owner_references
+        .as_ref()?
+        .iter()
+        .find(|o| o.controller == Some(true))
+        .map(|o| (o.kind.clone(), o.name.clone()))
+}
+
+fn first_image(spec: Option<Option<PodSpec>>) -> String {
+    spec.flatten()
+        .and_then(|s| s.containers.into_iter().next())
+        .and_then(|c| c.image)
+        .unwrap_or_default()
+}
+
+fn workload(kind: WorkloadKind, meta: ObjectMeta, desired: i32, ready: i32, image: String) -> WorkloadInfo {
+    WorkloadInfo {
+        kind,
+        owner: controller(&meta),
+        name: meta.name.unwrap_or_default(),
+        namespace: meta.namespace.unwrap_or_default(),
+        desired,
+        ready,
+        image,
+    }
+}
+
+/// Background refresh of traffic, RBAC and Helm (and CRD discovery), written into `shared`.
+async fn slow_loop(client: Client, shared: Shared, wake: Arc<Notify>) {
+    let mut crds_at: Option<Instant> = None;
+    let mut slow_at: Option<Instant> = None;
+    let mut helm_cache: HelmPayloads = BTreeMap::new();
+    let limit = Duration::from_secs(90);
+    loop {
+        if crds_at.is_none_or(|t| t.elapsed() >= DISCOVERY_INTERVAL) {
+            crds_at = Some(Instant::now());
+            let crds = Crds::discover(&client).await;
+            shared.lock().unwrap().crds = crds;
+        }
+        let crds = shared.lock().unwrap().crds.clone();
+
+        // Fast lane: Argo CD Applications and metrics.
+        let (apps, metrics) = tokio::join!(
+            async {
+                match &crds.application {
+                    Some(ar) => Some(tokio::time::timeout(Duration::from_secs(20), gitops::list(&client, ar)).await),
+                    None => None,
+                }
+            },
+            async {
+                match (&crds.node_metrics, &crds.pod_metrics) {
+                    (Some(n), Some(p)) => Some(tokio::time::timeout(Duration::from_secs(20), metrics::fetch(&client, n, p)).await),
+                    _ => None,
+                }
+            },
+        );
+        {
+            let mut live_errors = vec![];
+            let mut st = shared.lock().unwrap();
+            match apps {
+                Some(Ok(Ok(a))) => st.apps = a,
+                Some(Ok(Err(e))) => live_errors.push(lane_error("ArgoCD", "applications", format!("{e:#}"))),
+                Some(Err(_)) => live_errors.push(lane_error("ArgoCD", "applications", "timed out after 20s".into())),
+                None => st.apps.clear(),
+            }
+            match metrics {
+                Some(Ok(Ok(m))) => st.metrics = Some(m),
+                Some(Ok(Err(e))) => live_errors.push(lane_error("Metrics", "metrics.k8s.io", format!("{e:#}"))),
+                Some(Err(_)) => live_errors.push(lane_error("Metrics", "metrics.k8s.io", "timed out after 20s".into())),
+                None => st.metrics = None,
+            }
+            st.live_errors = live_errors;
+        }
+
+        // Slow lane: traffic, RBAC, Helm.
+        if slow_at.is_none_or(|t| t.elapsed() >= SLOW_INTERVAL) {
+            slow_at = Some(Instant::now());
+            let (net, rbac, helm) = tokio::join!(
+                tokio::time::timeout(limit, ops::net(&client, &crds)),
+                tokio::time::timeout(limit, ops::rbac(&client)),
+                tokio::time::timeout(limit, helm_releases(&client, &mut helm_cache)),
+            );
+            let mut errors = vec![];
+            let mut st = shared.lock().unwrap();
+            match net {
+                Ok(Ok(n)) => st.net = n,
+                Ok(Err(e)) => errors.push(lane_error("OpsList", "traffic", format!("{e:#}"))),
+                Err(_) => errors.push(lane_error("OpsList", "traffic", "timed out after 90s".into())),
+            }
+            match rbac {
+                Ok(Ok(r)) => st.rbac = r,
+                Ok(Err(e)) => errors.push(lane_error("OpsList", "rbac", format!("{e:#}"))),
+                Err(_) => errors.push(lane_error("OpsList", "rbac", "timed out after 90s".into())),
+            }
+            match helm {
+                Ok(Ok(h)) => st.helm = h,
+                Ok(Err(e)) => errors.push(lane_error("HelmList", "secrets/owner=helm", format!("{e:#}"))),
+                Err(_) => errors.push(lane_error("HelmList", "secrets/owner=helm", "timed out after 90s".into())),
+            }
+            st.errors = errors;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(LIVE_INTERVAL) => {}
+            // A refresh request or an action: re-fetch everything now.
+            _ = wake.notified() => slow_at = None,
+        }
+    }
+}
+
+fn lane_error(reason: &str, object: &str, message: String) -> EventInfo {
+    EventInfo { reason: reason.into(), object: object.into(), message, count: 1 }
+}
+
+/// Decoded chart info per release revision — a revision's payload never changes, so it is fetched once.
+type HelmPayloads = BTreeMap<(String, String, i32), (String, String, String)>;
+
+/// Helm 3 keeps each release revision in a Secret (`owner=helm`). Labels carry name, revision and
+/// status; the (large) gzipped payload is only fetched for revisions not seen before.
+async fn helm_releases(client: &Client, cache: &mut HelmPayloads) -> Result<Vec<HelmRelease>> {
+    let lp = ListParams::default().labels("owner=helm,status!=superseded");
+    let secrets = Api::<Secret>::all(client.clone()).list_metadata(&lp).await.context("listing Helm release secrets")?;
+    let mut latest: BTreeMap<(String, String), HelmRelease> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for s in secrets.items {
+        let labels = s.metadata.labels.clone().unwrap_or_default();
+        let namespace = s.metadata.namespace.clone().unwrap_or_default();
+        let name = labels.get("name").cloned().unwrap_or_default();
+        let revision = labels.get("version").and_then(|v| v.parse().ok()).unwrap_or(0);
+        let key = (namespace.clone(), name.clone(), revision);
+        if !cache.contains_key(&key) {
+            let secret = Api::<Secret>::namespaced(client.clone(), &namespace)
+                .get(s.metadata.name.as_deref().unwrap_or_default())
+                .await
+                .with_context(|| format!("reading Helm release {namespace}/{name}"))?;
+            let info = match secret.data.as_ref().and_then(|d| d.get("release")).and_then(|b| decode_release(&b.0)) {
+                Some(body) => {
+                    let meta = &body["chart"]["metadata"];
+                    (
+                        format!("{}-{}", meta["name"].as_str().unwrap_or("?"), meta["version"].as_str().unwrap_or("?")),
+                        meta["appVersion"].as_str().unwrap_or_default().to_string(),
+                        body["info"]["last_deployed"].as_str().unwrap_or_default().chars().take(19).collect(),
+                    )
+                }
+                None => Default::default(),
+            };
+            cache.insert(key.clone(), info);
+        }
+        let (chart, app_version, updated) = cache[&key].clone();
+        seen.insert(key);
+        let rel = HelmRelease {
+            name: name.clone(),
+            namespace: namespace.clone(),
+            revision,
+            status: labels.get("status").cloned().unwrap_or_default(),
+            chart,
+            app_version,
+            updated,
+        };
+        let k = (namespace, name);
+        if latest.get(&k).is_none_or(|r| r.revision < rel.revision) {
+            latest.insert(k, rel);
+        }
+    }
+    cache.retain(|k, _| seen.contains(k));
+    Ok(latest.into_values().collect())
+}
+
+/// Release payload: base64 (inside the already-decoded Secret data) of gzipped JSON.
+fn decode_release(raw: &[u8]) -> Option<serde_json::Value> {
+    use base64::Engine;
+    use std::io::Read;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(raw).ok()?;
+    let json = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(&bytes[..]).read_to_end(&mut out).ok()?;
+        out
+    } else {
+        bytes
+    };
+    serde_json::from_slice(&json).ok()
+}
+
+/// Certificates that failed or are about to expire, as ticker warnings.
+fn cert_warnings(net: &NetInfo) -> Vec<EventInfo> {
+    net.certs
+        .iter()
+        .filter_map(|c| {
+            let message = match (c.ready, c.days_left) {
+                (false, _) => format!("not ready: {} {}", c.reason, c.message),
+                (true, Some(d)) if d < 14 => format!("expires in {d} days (renewal {})", c.renewal.as_deref().unwrap_or("?")),
+                _ => return None,
+            };
+            Some(EventInfo { reason: "Certificate".into(), object: format!("certificate/{}/{}", c.namespace, c.name), message, count: 1 })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helm_payload_roundtrip() {
+        use base64::Engine;
+        use std::io::Write;
+        let json = br#"{"chart":{"metadata":{"name":"argo-cd","version":"5.1.0","appVersion":"v2.6"}},"info":{"status":"deployed"}}"#;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(json).unwrap();
+        let raw = base64::engine::general_purpose::STANDARD.encode(gz.finish().unwrap());
+        let v = decode_release(raw.as_bytes()).unwrap();
+        assert_eq!(v["chart"]["metadata"]["name"], "argo-cd");
+    }
+}
