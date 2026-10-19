@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod cleanup;
 mod cloud;
 #[cfg(test)]
 mod dast;

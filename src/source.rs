@@ -40,6 +40,7 @@ pub struct SlowState {
     rbac: RbacInfo,
     helm: Vec<HelmRelease>,
     storage: crate::storage::StorageInfo,
+    cleanup: Vec<crate::cleanup::Finding>,
     apps: Vec<AppInfo>,
     metrics: Option<Metrics>,
     /// Errors of the 20 s lane and of the 5 s lane (apps, metrics), kept apart so each lane replaces its own.
@@ -69,6 +70,8 @@ pub enum Cmd {
     Probe(Vec<(usize, ClusterEntry)>),
     /// `du`/`df` of hostPath/local volumes on their nodes.
     Measure(Vec<crate::storage::Target>),
+    /// Delete a cleanup candidate.
+    Delete(crate::cleanup::Finding),
 }
 
 #[derive(Clone, Debug)]
@@ -291,6 +294,7 @@ impl Source {
                     apps: slow.apps.clone(),
                     metrics: slow.metrics.clone(),
                     storage: slow.storage.clone(),
+                    cleanup: slow.cleanup.clone(),
                     infra: Default::default(),
                     fetched_at: Instant::now(),
                     error: None,
@@ -304,6 +308,22 @@ impl Source {
             Source::Idle => Err("no cluster selected".into()),
             Source::Demo(sim) => Ok(sim.measure(targets)),
             Source::Kube { client, dry_run, .. } => crate::storage::measure(client, targets, *dry_run).await.map_err(|e| format!("{e:#}")),
+        }
+    }
+
+    async fn delete(&mut self, f: &crate::cleanup::Finding) -> Result<String, String> {
+        let what =
+            format!("deleted {} {}{}", f.kind, if f.namespace.is_empty() { String::new() } else { format!("{}/", f.namespace) }, f.name);
+        match self {
+            Source::Idle => Err("no cluster selected".into()),
+            Source::Demo(sim) => {
+                sim.delete(f);
+                Ok(format!("{what} (demo)"))
+            }
+            Source::Kube { client, dry_run, .. } => crate::cleanup::delete(client, f, *dry_run)
+                .await
+                .map(|_| if *dry_run { format!("dry-run OK: {what}") } else { what })
+                .map_err(|e| format!("{e:#}")),
         }
     }
 
@@ -459,6 +479,13 @@ pub async fn run(
                                 let result = probe(&entry, &cfg, &resolver).await.map_err(|e| format!("{e:#}"));
                                 let _ = tx.send(Msg::Probed { index, result });
                             });
+                        }
+                    }
+                    Some(Cmd::Delete(finding)) => {
+                        let res = source.delete(&finding).await;
+                        source.wake();
+                        if tx.send(Msg::ActionDone(res)).is_err() {
+                            return;
                         }
                     }
                     Some(Cmd::Measure(targets)) => {
@@ -677,28 +704,40 @@ async fn slow_loop(client: Client, shared: Shared, wake: Arc<Notify>) {
                 tokio::time::timeout(limit, crate::storage::fetch(&client)),
             );
             let mut errors = vec![];
+            // The guard must be gone before the next await: scoped, returning what cleanup needs.
+            let (net, storage) = {
+                let mut st = shared.lock().unwrap();
+                match net {
+                    Ok(Ok(n)) => st.net = n,
+                    Ok(Err(e)) => errors.push(lane_error("OpsList", "traffic", format!("{e:#}"))),
+                    Err(_) => errors.push(lane_error("OpsList", "traffic", "timed out after 90s".into())),
+                }
+                match rbac {
+                    Ok(Ok(r)) => st.rbac = r,
+                    Ok(Err(e)) => errors.push(lane_error("OpsList", "rbac", format!("{e:#}"))),
+                    Err(_) => errors.push(lane_error("OpsList", "rbac", "timed out after 90s".into())),
+                }
+                match storage {
+                    Ok(Ok(s)) => st.storage = s,
+                    Ok(Err(e)) => errors.push(lane_error("OpsList", "storage", format!("{e:#}"))),
+                    Err(_) => errors.push(lane_error("OpsList", "storage", "timed out after 90s".into())),
+                }
+                match helm {
+                    Ok(Ok(h)) => st.helm = h,
+                    Ok(Err(e)) => errors.push(lane_error("HelmList", "secrets/owner=helm", format!("{e:#}"))),
+                    Err(_) => errors.push(lane_error("HelmList", "secrets/owner=helm", "timed out after 90s".into())),
+                }
+                st.errors = errors;
+                (st.net.clone(), st.storage.clone())
+            };
+            // Cleanup candidates build on the traffic and storage data just fetched.
+            let found = tokio::time::timeout(limit, crate::cleanup::scan(&client, &net, &storage)).await;
             let mut st = shared.lock().unwrap();
-            match net {
-                Ok(Ok(n)) => st.net = n,
-                Ok(Err(e)) => errors.push(lane_error("OpsList", "traffic", format!("{e:#}"))),
-                Err(_) => errors.push(lane_error("OpsList", "traffic", "timed out after 90s".into())),
+            match found {
+                Ok(Ok(f)) => st.cleanup = f,
+                Ok(Err(e)) => st.errors.push(lane_error("OpsList", "cleanup", format!("{e:#}"))),
+                Err(_) => st.errors.push(lane_error("OpsList", "cleanup", "timed out after 90s".into())),
             }
-            match rbac {
-                Ok(Ok(r)) => st.rbac = r,
-                Ok(Err(e)) => errors.push(lane_error("OpsList", "rbac", format!("{e:#}"))),
-                Err(_) => errors.push(lane_error("OpsList", "rbac", "timed out after 90s".into())),
-            }
-            match storage {
-                Ok(Ok(s)) => st.storage = s,
-                Ok(Err(e)) => errors.push(lane_error("OpsList", "storage", format!("{e:#}"))),
-                Err(_) => errors.push(lane_error("OpsList", "storage", "timed out after 90s".into())),
-            }
-            match helm {
-                Ok(Ok(h)) => st.helm = h,
-                Ok(Err(e)) => errors.push(lane_error("HelmList", "secrets/owner=helm", format!("{e:#}"))),
-                Err(_) => errors.push(lane_error("HelmList", "secrets/owner=helm", "timed out after 90s".into())),
-            }
-            st.errors = errors;
         }
         tokio::select! {
             _ = tokio::time::sleep(LIVE_INTERVAL) => {}

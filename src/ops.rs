@@ -296,6 +296,8 @@ pub struct CertInfo {
     pub days_left: Option<i64>,
     /// Pending ACME challenges: "http-01 kibana.example.com: pending — Waiting for HTTP-01 challenge propagation".
     pub challenges: Vec<String>,
+    /// Days since the Ready condition last changed, when it is not ready.
+    pub broken_days: Option<i64>,
 }
 
 impl CertInfo {
@@ -1267,6 +1269,11 @@ pub async fn net(client: &Client, crds: &Crds) -> Result<NetInfo> {
             renewal: Some(s(v, &["status", "renewalTime"])).filter(|x| !x.is_empty()),
             not_after,
             challenges: cert_challenges,
+            broken_days: ready
+                .filter(|r| r["status"] != "True")
+                .and_then(|r| r["lastTransitionTime"].as_str())
+                .and_then(days_until)
+                .map(|d| -d),
             namespace: ns,
             name,
         });

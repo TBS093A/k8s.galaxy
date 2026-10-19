@@ -22,6 +22,8 @@ under a dated heading, `## X.Y.Z - YYYY-MM-DD` (checked by the release workflow)
 - CPU/memory from metrics-server, requests vs allocatable without it.
 - Cluster picker for every kubeconfig in `~/.kube` and `$KUBECONFIG`, with infrastructure
   detection (managed EKS/GKE/AKS/…, cloud VMs, bare metal, local, hybrid) and the distribution.
+- Cleanup view: leftover volumes, pods, jobs, ACME solvers, broken routes, failing certificates,
+  unused config, selector-less services and empty namespaces, with deletes behind a confirmation.
 - Watch API for nodes, pods, events and workloads: snapshots read local caches (default refresh 2 s).
 - `--dry-run` (server-side validation of every action) and `--read-only`.
 - CI/CD: CI, Security (secrets, SAST, SCA, DAST), post-merge builds and tag releases.

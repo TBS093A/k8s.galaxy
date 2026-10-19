@@ -48,6 +48,7 @@ fn accent(view: View) -> Rgb {
         View::Network => fx::CYAN,
         View::Argo => fx::GREEN,
         View::Storage => (150, 120, 255),
+        View::Cleanup => fx::AMBER,
         _ => fx::AMBER,
     }
 }
@@ -147,6 +148,16 @@ fn list(f: &mut Frame, area: Rect, app: &App) {
             format!(" j/k select · R restart · p pause/resume · u undo · P promote · F full · A abort · Y retry{mode} ")
         }
         View::Network => " j/k select · t tab · ⏎ full details ".into(),
+        View::Cleanup => {
+            let mode = if app.read_only {
+                "  READ-ONLY"
+            } else if app.dry_run {
+                "  DRY-RUN"
+            } else {
+                ""
+            };
+            format!(" j/k select · d delete (asks first) · ⏎ details · candidates, not verdicts — check before deleting{mode} ")
+        }
         View::Storage => {
             let mode = if app.read_only {
                 "  READ-ONLY"
@@ -207,6 +218,7 @@ fn empty_hint(app: &App) -> Vec<Line<'static>> {
     let msg = match app.view {
         View::Rollouts => "no workloads yet".to_string(),
         View::Storage => "no PersistentVolumes or claims in this cluster".into(),
+        View::Cleanup => "nothing to clean up — or the cluster has not been scanned yet (every 20 s)".into(),
         View::Argo if !caps.argocd => "Argo CD (applications.argoproj.io) is not installed in this cluster.".into(),
         View::Argo => "no Argo CD Applications".into(),
         View::Network => match app.net_tab {
@@ -258,6 +270,15 @@ fn summary(app: &App) -> Vec<Span<'static>> {
                 v.push(st(format!("  {bad} failing"), fx::RED));
             }
             v
+        }
+        View::Cleanup => {
+            let c = &app.snap.cleanup;
+            let deletable = c.iter().filter(|f| f.deletable).count();
+            let warn = c.iter().filter(|f| f.severity != Health::Ok).count();
+            vec![
+                st(format!("  {} candidates · {deletable} deletable", c.len()), fx::STEEL),
+                st(format!("  {warn} need attention"), fx::AMBER),
+            ]
         }
         View::Storage => {
             let s = &app.snap.storage;
@@ -475,6 +496,19 @@ fn row(app: &App, o: &OpsRef, t: f64) -> Line<'static> {
                 s.push(st(" unmounted", fx::STEEL));
             }
             Line::from(s)
+        }
+        OpsRef::Finding(f) => {
+            let mut v = vec![
+                dot,
+                st(format!("{:<22}", pad(f.kind, 21)), fx::STEEL),
+                st(pad(&if f.namespace.is_empty() { f.name.clone() } else { format!("{}/{}", f.namespace, f.name) }, 44), TEXT),
+                st(format!("{:>6} ", f.age_days.map(|d| format!("{d}d")).unwrap_or_default()), fx::STEEL),
+                st(f.reason.clone(), if f.severity == Health::Ok { fx::STEEL } else { health_rgb(f.severity) }),
+            ];
+            if !f.deletable {
+                v.push(st("  (not deletable here)", fx::STEEL));
+            }
+            Line::from(v)
         }
         OpsRef::Class(c) => {
             let n = app.snap.storage.volumes.iter().filter(|v| v.class == c.name).count();
@@ -729,6 +763,41 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
         }
         OpsRef::Subject(s, bindings) => subject_detail(&app.snap.rbac, s, bindings),
         OpsRef::App(a) => app_detail(app, a),
+        OpsRef::Finding(f) => {
+            let mut l = vec![
+                Line::from(vec![
+                    bold(format!("{} ", f.kind), fx::AMBER),
+                    bold(if f.namespace.is_empty() { f.name.clone() } else { format!("{}/{}", f.namespace, f.name) }, TEXT),
+                ]),
+                kv("category", f.category.to_string()),
+                kv("why", f.reason.clone()),
+                kv("age", f.age_days.map(|d| format!("{d} days")).unwrap_or_else(|| "—".into())),
+            ];
+            if !f.notes.is_empty() {
+                l.push(Line::raw(""));
+                l.push(section("before deleting"));
+                for (h, text) in &f.notes {
+                    let color = match h {
+                        Health::Bad => fx::RED,
+                        Health::Warn => fx::AMBER,
+                        Health::Ok => fx::STEEL,
+                    };
+                    l.push(Line::from(vec![st(if *h == Health::Ok { "  · " } else { "  ▲ " }, color), st(text.clone(), color)]));
+                }
+            }
+            l.push(Line::raw(""));
+            l.push(section("action"));
+            l.push(if f.deletable && !app.read_only {
+                Line::from(vec![
+                    st("  ", TEXT),
+                    Span::styled(" d ", Style::new().fg(fx::c(fx::BG)).bg(fx::c(fx::AMBER))),
+                    st(" delete (asks first)", TEXT),
+                ])
+            } else {
+                Line::from(st("  not offered for deletion here", fx::STEEL))
+            });
+            l
+        }
         OpsRef::Volume(v) => volume_detail(app, v, t),
         OpsRef::Class(c) => {
             let vols: Vec<_> = app.snap.storage.volumes.iter().filter(|v| v.class == c.name).collect();

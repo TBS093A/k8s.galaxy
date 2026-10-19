@@ -19,6 +19,7 @@ struct DemoApp {
 
 pub struct OpsSim {
     apps: Vec<DemoApp>,
+    cleanup: Vec<Finding>,
     rollouts: Vec<DemoRollout>,
     net: NetInfo,
     rbac: RbacInfo,
@@ -184,7 +185,15 @@ impl OpsSim {
             rollouts.push(DemoRollout { info: r, timer: 0 });
         }
 
-        OpsSim { apps: demo_apps(), rollouts, net: demo_net(), rbac: demo_rbac() }
+        OpsSim { apps: demo_apps(), cleanup: demo_cleanup(), rollouts, net: demo_net(), rbac: demo_rbac() }
+    }
+
+    pub fn cleanup(&self) -> Vec<Finding> {
+        self.cleanup.clone()
+    }
+
+    pub fn delete(&mut self, f: &Finding) {
+        self.cleanup.retain(|x| x.key() != f.key());
     }
 
     pub fn apps(&self) -> Vec<AppInfo> {
@@ -436,6 +445,7 @@ fn cert(
         renewal: days.map(|d| format!("in {} days", d - 30)),
         days_left: days,
         challenges: vec![],
+        broken_days: if ready { None } else { Some(9) },
     }
 }
 
@@ -1257,4 +1267,150 @@ pub fn demo_measure(targets: &[Target]) -> crate::storage::Measurements {
             (t.pv.clone(), res)
         })
         .collect()
+}
+
+use crate::cleanup::Finding;
+use crate::model::Health;
+
+pub fn demo_cleanup() -> Vec<Finding> {
+    let f =
+        |kind, ns: &str, name: &str, category, severity, reason: &str, age: i64, deletable: bool, notes: Vec<(Health, String)>| Finding {
+            kind,
+            namespace: ns.into(),
+            name: name.into(),
+            category,
+            severity,
+            reason: reason.into(),
+            age_days: Some(age),
+            deletable,
+            notes,
+        };
+    vec![
+        f(
+            "PersistentVolume",
+            "",
+            "pv-old-grafana",
+            "Released volumes",
+            Health::Warn,
+            "claim monitoring/grafana was deleted; Retain kept the volume",
+            41,
+            true,
+            vec![(
+                Health::Bad,
+                "deleting the PV does not delete the data: remove /data/grafana on worker-fsn1-1 by hand if it is not needed".into(),
+            )],
+        ),
+        f(
+            "PersistentVolumeClaim",
+            "search",
+            "search-api-tmp",
+            "Unmounted claims",
+            Health::Ok,
+            "bound but no pod mounts it",
+            12,
+            true,
+            vec![(Health::Bad, "reclaim policy Delete: deleting the claim DESTROYS the volume and its data".into())],
+        ),
+        f("Pod", "ci", "docker-builder-a192-7", "Finished pods", Health::Ok, "Evicted, not owned by a Job", 3, true, vec![]),
+        f("Pod", "shop", "migrate-db-x81k", "Finished pods", Health::Ok, "Succeeded, not owned by a Job", 19, true, vec![]),
+        f(
+            "Job",
+            "catalog",
+            "reindex-2026-09",
+            "Old jobs",
+            Health::Ok,
+            "completed 33 days ago, no ttlSecondsAfterFinished",
+            33,
+            true,
+            vec![(Health::Ok, "its pods are deleted with it".into())],
+        ),
+        f(
+            "Ingress",
+            "monitoring",
+            "cm-acme-http-solver-7xq2p",
+            "ACME solver leftovers",
+            Health::Warn,
+            "challenge for kibana.example.com is still pending — the certificate is failing, fix that first",
+            9,
+            false,
+            vec![],
+        ),
+        f(
+            "Ingress",
+            "shop",
+            "cm-acme-http-solver-k2v9d",
+            "ACME solver leftovers",
+            Health::Ok,
+            "no challenge for shop.example.com is active any more",
+            120,
+            true,
+            vec![],
+        ),
+        f(
+            "Ingress",
+            "monitoring",
+            "kibana",
+            "Broken routes",
+            Health::Warn,
+            "kibana.example.com → service kibana-kb-http does not exist",
+            300,
+            true,
+            vec![(Health::Warn, "if the app was removed, the Ingress (and its Certificate) can go too".into())],
+        ),
+        f(
+            "Certificate",
+            "monitoring",
+            "kibana-tls",
+            "Failing certificates",
+            Health::Warn,
+            "not ready for 9 days (DoesNotExist): kibana.example.com",
+            9,
+            true,
+            vec![(Health::Ok, "its Secret kibana-tls is left in place; delete it too if the host is gone".into())],
+        ),
+        f(
+            "ConfigMap",
+            "shop",
+            "checkout-api-config-old",
+            "Possibly unused config",
+            Health::Ok,
+            "no pod mounts or reads it",
+            64,
+            true,
+            vec![(Health::Warn, "controllers and apps can read ConfigMaps through the API — check before deleting".into())],
+        ),
+        f(
+            "Secret",
+            "catalog",
+            "legacy-s3-credentials",
+            "Possibly unused config",
+            Health::Ok,
+            "no pod mounts or reads it, no Ingress uses it",
+            210,
+            true,
+            vec![(Health::Warn, "operators, Argo CD and registries read Secrets through the API — check before deleting".into())],
+        ),
+        f(
+            "Service",
+            "shop",
+            "payments-legacy",
+            "Services without pods",
+            Health::Warn,
+            "selector app=payments-legacy matches no pod",
+            88,
+            true,
+            vec![],
+        ),
+        f(
+            "Namespace",
+            "",
+            "sandbox-old",
+            "Empty namespaces",
+            Health::Ok,
+            "no pods, services or volumes",
+            150,
+            false,
+            vec![(Health::Ok, "not deletable from here: deleting a namespace deletes everything in it".into())],
+        ),
+    ]
 }

@@ -30,7 +30,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         View::Map => map::draw(f, main, app),
         View::Galaxy => galaxy::draw(f, main, app),
         View::Radar => radar::draw(f, main, app),
-        View::Rollouts | View::Network | View::Access | View::Argo | View::Storage => ops::draw(f, body, app),
+        View::Rollouts | View::Network | View::Access | View::Argo | View::Storage | View::Cleanup => ops::draw(f, body, app),
     }
     if !app.view.is_ops() {
         panels::sidebar(f, side, app);

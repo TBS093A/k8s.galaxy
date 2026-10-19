@@ -189,6 +189,20 @@ Flagged (and sent to the warnings ticker): Pending claims, Lost/Failed volumes, 
 data, `hostPath` volumes without node affinity (a pod moved to another node sees an empty directory), volumes
 ≥ 85 % / 95 % full, a node filesystem filling up.
 
+## Cleanup
+
+`9 CLEANUP` collects what is probably left over, grouped by kind, with the reason and age:
+Released volumes still holding data, unclaimed volumes, claims no pod mounts, finished pods outside Jobs,
+Jobs done for a week without a TTL, cert-manager HTTP-01 solvers with no active challenge, Ingresses
+pointing at Services that do not exist, Certificates failing for a week or more, ConfigMaps and Secrets
+no pod or Ingress uses (Helm/Argo CD-managed and sidecar-watched ones excluded), Services whose selector
+matches no pod, and empty namespaces.
+
+They are candidates, not verdicts. `d` deletes one after a confirmation that lists what else to know —
+e.g. that deleting a hostPath PV leaves the data on the node, or that deleting a claim with reclaim policy
+`Delete` destroys the volume. Solvers of a still-pending challenge and namespaces are shown but not offered
+for deletion. `--dry-run` only validates the deletes; `--read-only` disables them.
+
 ## Resource usage
 
 With metrics-server (`metrics.k8s.io`) installed: node CPU/memory bars in the details panel, per-pod usage in the pod list, load arcs around each star in the Galaxy (CPU inner, memory outer, green → amber → red) and planets sized by memory in use. Without it, the details panel shows **requests vs allocatable**, which every cluster has.
@@ -198,7 +212,7 @@ watch streams into local caches: the API server sends only changes. Traffic, RBA
 
 ## Keys
 
-`1-8`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `m` measure volumes (storage view) · `c` clusters · `r` refresh now · `q` quit
+`1-9`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `m` measure volumes (storage view) · `d` delete (cleanup view) · `c` clusters · `r` refresh now · `q` quit
 
 ## Layout
 
@@ -215,6 +229,8 @@ src/
   infra.rs    managed / cloud VMs / bare metal / local detection, distributions
   kubeconfigs.rs  kubeconfig discovery in ~/.kube and $KUBECONFIG, cluster probes
   metrics.rs  metrics-server usage, quantity parsing
+  cleanup.rs  leftover detection and deletes
+  watch.rs    watch streams + reflector caches for the live lists
   storage.rs  PV/PVC/StorageClass, in-cluster vs external, kubelet volume stats, du measurement
   ops.rs      rollouts, traffic (Ingress/Gateway API/cert-manager), RBAC, rollout actions
   demo_ops.rs simulated rollouts/traffic/RBAC for --demo

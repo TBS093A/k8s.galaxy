@@ -26,8 +26,12 @@ pub fn header(f: &mut Frame, area: Rect, app: &App) {
         spans.push(styled(format!("[{}] ", snap.infra.badge()), super::picker::hosting_rgb(&snap.infra)));
     }
     spans.push(Span::raw(" "));
+    // Nine views do not fit next to a long cluster name on a narrow terminal: short labels then.
+    let full: usize = View::ALL.iter().enumerate().map(|(i, v)| format!(" {} {} ", i + 1, v.title()).chars().count()).sum();
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let short = used + full + 60 > area.width as usize;
     for (i, v) in View::ALL.iter().enumerate() {
-        let label = format!(" {} {} ", i + 1, v.title());
+        let label = format!(" {} {} ", i + 1, if short { v.short() } else { v.title() });
         spans.push(if *v == app.view {
             Span::styled(label, Style::new().fg(fx::c(fx::BG)).bg(fx::c(fx::MAGENTA)).add_modifier(Modifier::BOLD))
         } else {
@@ -293,7 +297,7 @@ pub fn footer(f: &mut Frame, area: Rect, app: &App) {
     };
     let keys: &[(&str, &str)] = if app.view.is_ops() {
         &[
-            ("1-8/Tab", "view"),
+            ("1-9/Tab", "view"),
             ("j/k", "select"),
             ("t", "tab"),
             ("⏎", "details"),
@@ -304,7 +308,7 @@ pub fn footer(f: &mut Frame, area: Rect, app: &App) {
         ]
     } else {
         &[
-            ("1-8/Tab", "view"),
+            ("1-9/Tab", "view"),
             ("j/k", "select"),
             ("⏎/→", "list·open"),
             ("t", "kind"),

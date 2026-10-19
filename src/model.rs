@@ -199,6 +199,7 @@ pub struct Snapshot {
     pub metrics: Option<crate::metrics::Metrics>,
     pub infra: crate::infra::Infra,
     pub storage: crate::storage::StorageInfo,
+    pub cleanup: Vec<crate::cleanup::Finding>,
     pub fetched_at: Instant,
     pub error: Option<String>,
 }
@@ -220,6 +221,7 @@ impl Snapshot {
             metrics: None,
             infra: Default::default(),
             storage: Default::default(),
+            cleanup: vec![],
             fetched_at: Instant::now(),
             error: None,
         }

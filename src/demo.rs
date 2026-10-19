@@ -126,6 +126,10 @@ impl Sim {
         self.ops.perform_app(namespace, name, action)
     }
 
+    pub fn delete(&mut self, f: &crate::cleanup::Finding) {
+        self.ops.delete(f);
+    }
+
     pub fn measure(&self, targets: &[crate::storage::Target]) -> crate::storage::Measurements {
         crate::demo_ops::demo_measure(targets)
     }
@@ -235,6 +239,7 @@ impl Sim {
             apps: self.ops.apps(),
             metrics: Some(self.metrics()),
             storage: crate::demo_ops::demo_storage(),
+            cleanup: self.ops.cleanup(),
             infra: Default::default(),
             helm: self.helm(),
             fetched_at: Instant::now(),

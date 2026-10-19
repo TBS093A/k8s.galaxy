@@ -23,11 +23,12 @@ pub enum View {
     Access,
     Argo,
     Storage,
+    Cleanup,
 }
 
 impl View {
-    pub const ALL: [View; 8] =
-        [View::Map, View::Galaxy, View::Radar, View::Rollouts, View::Network, View::Access, View::Argo, View::Storage];
+    pub const ALL: [View; 9] =
+        [View::Map, View::Galaxy, View::Radar, View::Rollouts, View::Network, View::Access, View::Argo, View::Storage, View::Cleanup];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -39,12 +40,28 @@ impl View {
             View::Access => "RBAC",
             View::Argo => "ARGO",
             View::Storage => "STORAGE",
+            View::Cleanup => "CLEANUP",
+        }
+    }
+
+    /// Header tab label when the terminal is too narrow for the full titles.
+    pub fn short(self) -> &'static str {
+        match self {
+            View::Map => "MAP",
+            View::Galaxy => "GAL",
+            View::Radar => "RAD",
+            View::Rollouts => "ROLL",
+            View::Network => "NET",
+            View::Access => "RBAC",
+            View::Argo => "ARGO",
+            View::Storage => "DISK",
+            View::Cleanup => "CLEAN",
         }
     }
 
     /// Full-width operations views (no node sidebar).
     pub fn is_ops(self) -> bool {
-        matches!(self, View::Rollouts | View::Network | View::Access | View::Argo | View::Storage)
+        matches!(self, View::Rollouts | View::Network | View::Access | View::Argo | View::Storage | View::Cleanup)
     }
 
     fn ops_slot(self) -> usize {
@@ -53,6 +70,7 @@ impl View {
             View::Access => 2,
             View::Argo => 3,
             View::Storage => 4,
+            View::Cleanup => 5,
             _ => 0,
         }
     }
@@ -125,6 +143,7 @@ pub enum OpsRef<'a> {
     App(&'a AppInfo),
     Volume(&'a VolumeInfo),
     Class(&'a ClassInfo),
+    Finding(&'a crate::cleanup::Finding),
 }
 
 impl OpsRef<'_> {
@@ -157,6 +176,7 @@ impl OpsRef<'_> {
             OpsRef::App(a) => format!("project {}", a.project),
             OpsRef::Volume(v) => v.group(),
             OpsRef::Class(_) => "(cluster)".into(),
+            OpsRef::Finding(f) => f.category.into(),
         }
     }
 
@@ -172,6 +192,7 @@ impl OpsRef<'_> {
             OpsRef::App(a) => a.name.clone(),
             OpsRef::Volume(v) => v.name(),
             OpsRef::Class(c) => c.name.clone(),
+            OpsRef::Finding(f) => f.key(),
         }
     }
 }
@@ -181,6 +202,7 @@ pub enum Pending {
     Rollout(Action),
     App { namespace: String, name: String, action: AppAction },
     Measure(Vec<MeasureTarget>),
+    Delete(crate::cleanup::Finding),
 }
 
 impl Pending {
@@ -193,6 +215,9 @@ impl Pending {
                 let nodes: std::collections::BTreeSet<&str> = t.iter().map(|t| t.node.as_str()).collect();
                 ("MEASURE".into(), "volumes", format!("{} hostPath/local volume(s) on {} node(s)", t.len(), nodes.len()))
             }
+            Pending::Delete(f) => {
+                ("DELETE".into(), f.kind, if f.namespace.is_empty() { f.name.clone() } else { format!("{}/{}", f.namespace, f.name) })
+            }
         }
     }
 
@@ -201,6 +226,7 @@ impl Pending {
             Pending::Rollout(a) => matches!(a.kind, ActionKind::Abort | ActionKind::Undo | ActionKind::PromoteFull),
             Pending::App { action, .. } => *action == AppAction::SyncPrune,
             Pending::Measure(_) => false,
+            Pending::Delete(_) => true,
         }
     }
 
@@ -211,6 +237,7 @@ impl Pending {
                 Cmd::AppAction { namespace: namespace.clone(), name: name.clone(), action: *action }
             }
             Pending::Measure(t) => Cmd::Measure(t.clone()),
+            Pending::Delete(f) => Cmd::Delete(f.clone()),
         }
     }
 }
@@ -368,7 +395,7 @@ pub struct App {
     pub res_idx: usize,
     pub res_kind: ResKind,
     /// Selected entry of each operations view (rollouts, network, access).
-    pub ops_idx: [usize; 5],
+    pub ops_idx: [usize; 6],
     pub net_tab: NetTab,
     pub rbac_tab: RbacTab,
     pub store_tab: StoreTab,
@@ -414,7 +441,7 @@ impl App {
             node_idx: 0,
             res_idx: 0,
             res_kind: ResKind::Pods,
-            ops_idx: [0; 5],
+            ops_idx: [0; 6],
             net_tab: NetTab::Routes,
             rbac_tab: RbacTab::Subjects,
             store_tab: StoreTab::Volumes,
@@ -632,6 +659,7 @@ impl App {
                 StoreTab::Volumes => self.snap.storage.volumes.iter().map(|v| (v.health(self.measurement(v)), OpsRef::Volume(v))).collect(),
                 StoreTab::Classes => self.snap.storage.classes.iter().map(|c| (Health::Ok, OpsRef::Class(c))).collect(),
             },
+            View::Cleanup => self.snap.cleanup.iter().map(|f| (f.severity, OpsRef::Finding(f))).collect(),
             _ => vec![],
         };
         items.sort_by_key(|(h, o)| (o.group(), *h, o.name()));
@@ -666,6 +694,7 @@ impl App {
             OpsRef::App(a) => a.health(),
             OpsRef::Volume(v) => v.health(self.measurement(v)),
             OpsRef::Class(_) => Health::Ok,
+            OpsRef::Finding(f) => f.severity,
         }
     }
 
@@ -718,7 +747,7 @@ impl App {
         self.fitted_once = false;
         self.node_idx = 0;
         self.res_idx = 0;
-        self.ops_idx = [0; 5];
+        self.ops_idx = [0; 6];
         self.measured.clear();
         self.focus = Focus::Nodes;
         self.logs = None;
@@ -771,6 +800,25 @@ impl App {
     /// Successful `du` result for a volume, if it was measured.
     pub fn measurement(&self, v: &VolumeInfo) -> Option<&Measured> {
         self.measured.get(v.pv.as_deref()?)?.as_ref().ok()
+    }
+
+    /// `d` in the cleanup view: delete the selected candidate after confirmation.
+    fn request_delete(&mut self) {
+        let Some(OpsRef::Finding(f)) = self.selected_ops() else { return };
+        let f = f.clone();
+        if !f.deletable {
+            let why = f.notes.first().map(|(_, n)| n.clone()).unwrap_or_else(|| "not offered for deletion".into());
+            self.toast = Some(Toast { text: format!("{} {}: {why}", f.kind, f.name), ok: false, at: Instant::now() });
+            return;
+        }
+        if self.read_only {
+            self.toast = Some(Toast { text: "read-only mode (--read-only): deleting disabled".into(), ok: false, at: Instant::now() });
+            return;
+        }
+        let mut warnings = f.notes.clone();
+        warnings.insert(0, (Health::Ok, format!("found because: {}", f.reason)));
+        let explain = format!("deletes the {} from the cluster{}", f.kind, if f.kind == "Job" { " (with its pods)" } else { "" });
+        self.confirm = Some(Confirm { pending: Pending::Delete(f), explain, warnings });
     }
 
     /// `m`: measure every hostPath/local volume (one short-lived pod per node).
@@ -1040,6 +1088,7 @@ impl App {
             }
             KeyCode::Char('/') if self.view == View::Access => self.query = Some(String::new()),
             KeyCode::Char('m') if self.view == View::Storage => self.request_measure(),
+            KeyCode::Char('d') if self.view == View::Cleanup => self.request_delete(),
             KeyCode::Char(c) if self.view == View::Argo => match AppAction::ALL.iter().find(|a| a.key() == c) {
                 Some(a) => self.request_app_action(*a),
                 None => return false,
@@ -1188,6 +1237,7 @@ impl App {
             KeyCode::Char('6') => self.view = View::Access,
             KeyCode::Char('7') => self.view = View::Argo,
             KeyCode::Char('8') => self.view = View::Storage,
+            KeyCode::Char('9') => self.view = View::Cleanup,
             KeyCode::Tab => {
                 let i = View::ALL.iter().position(|v| *v == self.view).unwrap_or(0);
                 self.view = View::ALL[(i + 1) % View::ALL.len()];
