@@ -17,6 +17,7 @@ mod ops;
 mod source;
 mod storage;
 mod ui;
+mod watch;
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -43,8 +44,9 @@ struct Args {
     /// Run against a simulated cluster.
     #[arg(long)]
     demo: bool,
-    /// Poll interval in seconds.
-    #[arg(long, default_value_t = 5)]
+    /// Refresh interval in seconds. Nodes, pods, events and workloads come from watch streams,
+    /// so a refresh reads local caches and costs the API server nothing.
+    #[arg(long, default_value_t = 2)]
     interval: u64,
     /// Pin a node name / region / zone / location key: KEY=LAT,LON or KEY=PLACE, e.g. node-1=fsn1 (repeatable).
     #[arg(long = "place", value_parser = geo::parse_place)]

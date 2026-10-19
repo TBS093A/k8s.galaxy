@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use k8s_openapi::api::apps::v1::{ControllerRevision, DaemonSet, Deployment, ReplicaSet, StatefulSet};
 use k8s_openapi::api::core::v1::{Event, Node, Pod, PodSpec, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{ListParams, LogParams};
@@ -98,7 +97,7 @@ pub enum Msg {
 }
 
 /// Background task handle that stops the task when the source it belongs to is dropped.
-pub struct AbortOnDrop(tokio::task::JoinHandle<()>);
+pub struct AbortOnDrop(pub tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -117,6 +116,10 @@ pub enum Source {
         slow: Shared,
         wake: Arc<Notify>,
         dry_run: bool,
+        /// Watch streams + caches of the frequently changing lists.
+        watches: crate::watch::Watches,
+        /// Set after the first snapshot has waited for the caches to fill.
+        primed: bool,
         _task: AbortOnDrop,
     },
     Demo(Sim),
@@ -171,7 +174,8 @@ impl Source {
         let slow = Shared::default();
         let wake = Arc::new(Notify::new());
         let task = AbortOnDrop(tokio::spawn(slow_loop(client.clone(), slow.clone(), wake.clone())));
-        Source::Kube { client, cluster, server, version, slow, wake, dry_run: false, _task: task }
+        let watches = crate::watch::Watches::start(&client);
+        Source::Kube { client, cluster, server, version, slow, wake, dry_run: false, watches, primed: false, _task: task }
     }
 
     fn server_version(&self) -> (String, String) {
@@ -201,71 +205,82 @@ impl Source {
                 sim.step();
                 Ok(sim.snapshot())
             }
-            Source::Kube { client, cluster, slow, .. } => {
+            Source::Kube { client, cluster, slow, watches, primed, .. } => {
                 let rollout_crd = slow.lock().unwrap().crds.rollout.clone();
                 let lp = ListParams::default();
-                let (node_api, pod_api, event_api) =
-                    (Api::<Node>::all(client.clone()), Api::<Pod>::all(client.clone()), Api::<Event>::all(client.clone()));
-                let (dep_api, rs_api, ds_api, sts_api) = (
-                    Api::<Deployment>::all(client.clone()),
-                    Api::<ReplicaSet>::all(client.clone()),
-                    Api::<DaemonSet>::all(client.clone()),
-                    Api::<StatefulSet>::all(client.clone()),
+                // The first snapshot waits for the watch caches; later ones just read them.
+                if !*primed {
+                    watches.ready(Duration::from_secs(20)).await;
+                    *primed = true;
+                }
+                let watch_errors = watches.errors();
+                // Without nodes and pods there is nothing to show: report it like a failed poll.
+                if let Some((what, err)) = watch_errors.iter().find(|(w, _)| matches!(*w, "nodes" | "pods"))
+                    && watches.nodes.state().is_empty()
+                {
+                    anyhow::bail!("watching {what}: {err}");
+                }
+                use crate::watch::items;
+                let (nodes, pods, events) = (items(&watches.nodes), items(&watches.pods), items(&watches.events));
+                let (deps, rss, dss, stss, crs) = (
+                    items(&watches.deployments),
+                    items(&watches.replicasets),
+                    items(&watches.daemonsets),
+                    items(&watches.statefulsets),
+                    items(&watches.revisions),
                 );
-                let cr_api = Api::<ControllerRevision>::all(client.clone());
-                let (nodes, pods, events, deps, rss, dss, stss, crs) = tokio::try_join!(
-                    node_api.list(&lp),
-                    pod_api.list(&lp),
-                    event_api.list(&lp),
-                    dep_api.list(&lp),
-                    rs_api.list(&lp),
-                    ds_api.list(&lp),
-                    sts_api.list(&lp),
-                    cr_api.list(&lp),
-                )?;
                 let argo = match &rollout_crd {
                     Some(ar) => {
                         Api::<kube::api::DynamicObject>::all_with(client.clone(), ar).list(&lp).await.map(|l| l.items).unwrap_or_default()
                     }
                     None => vec![],
                 };
-                let rollouts = ops::rollouts(&deps.items, &rss.items, &stss.items, &dss.items, &crs.items, &argo);
+                let rollouts = ops::rollouts(&deps, &rss, &stss, &dss, &crs, &argo);
                 let mut workloads = vec![];
-                for d in deps.items {
+                for d in deps {
                     let s = d.status.unwrap_or_default();
                     let desired = d.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
                     let image = first_image(d.spec.map(|s| s.template.spec));
                     workloads.push(workload(WorkloadKind::Deployment, d.metadata, desired, s.ready_replicas.unwrap_or(0), image));
                 }
-                for r in rss.items {
+                for r in rss {
                     let s = r.status.unwrap_or_default();
                     let desired = r.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
                     let image = first_image(r.spec.and_then(|s| s.template).map(|t| t.spec));
                     workloads.push(workload(WorkloadKind::ReplicaSet, r.metadata, desired, s.ready_replicas.unwrap_or(0), image));
                 }
-                for d in dss.items {
+                for d in dss {
                     let s = d.status.unwrap_or_default();
                     let image = first_image(d.spec.map(|s| s.template.spec));
                     workloads.push(workload(WorkloadKind::DaemonSet, d.metadata, s.desired_number_scheduled, s.number_ready, image));
                 }
-                for st in stss.items {
+                for st in stss {
                     let s = st.status.unwrap_or_default();
                     let desired = st.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
                     let image = first_image(st.spec.map(|s| s.template.spec));
                     workloads.push(workload(WorkloadKind::StatefulSet, st.metadata, desired, s.ready_replicas.unwrap_or(0), image));
                 }
-                let mut warnings: Vec<_> = events.items.into_iter().filter(|e| e.type_.as_deref() == Some("Warning")).collect();
+                let mut warnings: Vec<_> = events.into_iter().filter(|e| e.type_.as_deref() == Some("Warning")).collect();
                 warnings.sort_by_key(|e| std::cmp::Reverse(e.last_timestamp.as_ref().map(|t| t.0.to_string())));
                 let mut warnings: Vec<EventInfo> = warnings.into_iter().take(50).map(event_info).collect();
                 let slow = slow.lock().unwrap();
                 warnings.splice(0..0, slow.errors.iter().cloned());
+                warnings.splice(
+                    0..0,
+                    watch_errors.into_iter().map(|(what, e)| EventInfo {
+                        reason: "Watch".into(),
+                        object: what.into(),
+                        message: e,
+                        count: 1,
+                    }),
+                );
                 warnings.splice(0..0, slow.live_errors.iter().cloned());
                 warnings.splice(0..0, cert_warnings(&slow.net));
                 warnings.splice(0..0, volume_warnings(&slow.storage));
                 Ok(Snapshot {
                     cluster: cluster.clone(),
-                    nodes: nodes.items.into_iter().map(node_info).collect(),
-                    pods: pods.items.into_iter().map(pod_info).collect(),
+                    nodes: nodes.into_iter().map(node_info).collect(),
+                    pods: pods.into_iter().map(pod_info).collect(),
                     warnings,
                     workloads,
                     helm: slow.helm.clone(),

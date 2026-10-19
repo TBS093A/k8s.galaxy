@@ -62,7 +62,7 @@ cargo run --release -- --kubeconfig ~/.kube/homelab.conf --home 52.23,21.01
 | `--aws-region R` | EC2 regions to list (repeatable/comma separated; default: CLI's region) |
 | `--gcp-project P` | GCP project (default: gcloud's configured one) |
 | `--cloud-interval SECS` | inventory refresh (default 300) |
-| `--interval SECS` | poll interval (default 5) |
+| `--interval SECS` | screen refresh (default 2); nodes, pods, events and workloads are watched, so it costs the API server nothing |
 | `--fps N` | animation frame rate (default 30) |
 
 ## Clusters
@@ -193,7 +193,8 @@ data, `hostPath` volumes without node affinity (a pod moved to another node sees
 
 With metrics-server (`metrics.k8s.io`) installed: node CPU/memory bars in the details panel, per-pod usage in the pod list, load arcs around each star in the Galaxy (CPU inner, memory outer, green → amber → red) and planets sized by memory in use. Without it, the details panel shows **requests vs allocatable**, which every cluster has.
 
-Traffic, RBAC and Helm refresh every 20 s in a background task (Helm release payloads are fetched once per revision), so a slow API server never stalls the live view.
+Nodes, pods, events, Deployments, ReplicaSets, DaemonSets, StatefulSets and ControllerRevisions come from
+watch streams into local caches: the API server sends only changes. Traffic, RBAC and Helm refresh every 20 s in a background task (Helm release payloads are fetched once per revision), so a slow API server never stalls the live view.
 
 ## Keys
 
@@ -232,5 +233,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) (pre-commit, tests, the deep DAST profile
 
 - Prometheus metrics (request rate → packet speed, error rate on routes)
 - Network attack layer on the map (firewall/Falco/Suricata sources as incoming arcs)
-- Watch API instead of polling
 - Extract `fx.rs` + canvas helpers into a `tui-fx` crate
