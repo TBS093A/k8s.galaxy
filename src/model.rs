@@ -21,6 +21,8 @@ pub struct NodeInfo {
     pub memory: String,
     pub allocatable: crate::metrics::Usage,
     pub kubelet: String,
+    /// e.g. "Ubuntu 22.04.4 LTS", "Talos (v1.7.5)", "Bottlerocket OS 1.20.0".
+    pub os_image: String,
     pub internal_ip: String,
     pub provider_id: String,
     /// Every address the kubelet reports (InternalIP, ExternalIP, Hostname).
@@ -33,6 +35,30 @@ pub struct NodeInfo {
 }
 
 impl NodeInfo {
+    #[cfg(test)]
+    pub fn test(name: &str) -> Self {
+        NodeInfo {
+            name: name.into(),
+            ready: true,
+            roles: vec![],
+            labels: Default::default(),
+            annotations: Default::default(),
+            region: String::new(),
+            zone: String::new(),
+            cpu: String::new(),
+            memory: String::new(),
+            allocatable: Default::default(),
+            kubelet: String::new(),
+            os_image: String::new(),
+            internal_ip: String::new(),
+            provider_id: String::new(),
+            addresses: vec![],
+            cloud: None,
+            geo: None,
+            place: String::new(),
+        }
+    }
+
     pub fn health(&self) -> Health {
         if self.ready { Health::Ok } else { Health::Bad }
     }
@@ -178,6 +204,7 @@ pub struct Snapshot {
     pub apps: Vec<crate::gitops::AppInfo>,
     /// Live usage from metrics-server; None when it is not installed.
     pub metrics: Option<crate::metrics::Metrics>,
+    pub infra: crate::infra::Infra,
     pub fetched_at: Instant,
     pub error: Option<String>,
 }
@@ -197,6 +224,7 @@ impl Snapshot {
             caps: Default::default(),
             apps: vec![],
             metrics: None,
+            infra: Default::default(),
             fetched_at: Instant::now(),
             error: None,
         }

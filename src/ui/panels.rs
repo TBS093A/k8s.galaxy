@@ -20,8 +20,12 @@ pub fn header(f: &mut Frame, area: Rect, app: &App) {
     let snap = &app.snap;
     let mut spans = vec![
         Span::styled(" ◆ K8S.GALAXY ", Style::new().fg(fx::c(fx::BG)).bg(fx::c(fx::CYAN)).add_modifier(Modifier::BOLD)),
-        styled(format!("  {}  ", snap.cluster), fx::STEEL),
+        styled(format!("  {} ", snap.cluster), fx::STEEL),
     ];
+    if snap.infra.hosting != crate::infra::Hosting::Unknown {
+        spans.push(styled(format!("[{}] ", snap.infra.badge()), super::picker::hosting_rgb(&snap.infra)));
+    }
+    spans.push(Span::raw(" "));
     for (i, v) in View::ALL.iter().enumerate() {
         let label = format!(" {} {} ", i + 1, v.title());
         spans.push(if *v == app.view {
@@ -43,7 +47,12 @@ pub fn header(f: &mut Frame, area: Rect, app: &App) {
     ]);
     if !app.synced {
         let dots = ".".repeat((t * 2.0) as usize % 4);
-        spans.push(Span::styled(format!("◌ CONNECTING{dots}"), Style::new().fg(fx::c(fx::AMBER))));
+        let text = match (&app.switching, app.active) {
+            (Some(label), _) => format!("◌ CONNECTING to {label}{dots}"),
+            (None, crate::app::Active::None) => "◌ NO CLUSTER — press c to pick one".to_string(),
+            _ => format!("◌ CONNECTING{dots}"),
+        };
+        spans.push(Span::styled(text, Style::new().fg(fx::c(fx::AMBER))));
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
@@ -105,7 +114,14 @@ pub fn sidebar(f: &mut Frame, area: Rect, app: &App) {
                 kv("place", n.place.clone()),
                 kv("region", format!("{} / {}", dash(&n.region), dash(&n.zone))),
                 kv("ip", format!("{}  {}", n.internal_ip, n.kubelet)),
-                kv("cloud", n.cloud.clone().unwrap_or_else(|| "—".into())),
+                kv("infra", {
+                    // What the node is, plus the cloud server id when an inventory matched it.
+                    let id = n.cloud.as_deref().and_then(|c| c.split_whitespace().last()).filter(|id| id.starts_with('#'));
+                    match id {
+                        Some(id) => format!("{} {id}", crate::infra::node_kind(n)),
+                        None => crate::infra::node_kind(n),
+                    }
+                }),
                 load_line("cpu", app.node_usage(&n.name).map(|u| u.cpu_m), app.node_requests(&n.name).cpu_m, n.allocatable.cpu_m, crate::metrics::fmt_cpu),
                 load_line("mem", app.node_usage(&n.name).map(|u| u.mem), app.node_requests(&n.name).mem, n.allocatable.mem, crate::metrics::fmt_mem),
                 Line::from(vec![
@@ -260,7 +276,7 @@ pub fn footer(f: &mut Frame, area: Rect, app: &App) {
         ]
     };
     let keys: &[(&str, &str)] = if app.view.is_ops() {
-        &[("1-7/Tab", "view"), ("j/k", "select"), ("t", "tab"), ("⏎", "details"), ("Esc", "map"), ("r", "refresh"), ("q", "quit")]
+        &[("1-7/Tab", "view"), ("j/k", "select"), ("t", "tab"), ("⏎", "details"), ("Esc", "map"), ("c", "clusters"), ("r", "refresh"), ("q", "quit")]
     } else {
         &[
             ("1-7/Tab", "view"),
@@ -272,6 +288,7 @@ pub fn footer(f: &mut Frame, area: Rect, app: &App) {
             ("HJKL", "pan"),
             ("f", "fit"),
             ("0", "world"),
+            ("c", "clusters"),
             ("r", "refresh"),
             ("q", "quit"),
         ]

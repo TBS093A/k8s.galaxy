@@ -198,8 +198,13 @@ impl Sim {
                         Usage { cpu_m: 7800, mem: 30 << 30 }
                     },
                     kubelet: "v1.34.1".into(),
+                    os_image: if n.location == "waw" { "Debian GNU/Linux 12 (bookworm)" } else { "Ubuntu 24.04.1 LTS" }.into(),
                     internal_ip: format!("10.0.0.{}", 10 + crate::fx::hash(n.name) % 200),
-                    provider_id: String::new(),
+                    provider_id: match n.location {
+                        "ash" => "aws:///us-east-1a/i-0e4b9c2d7f1a83b56".into(),
+                        "waw" => String::new(),
+                        _ => format!("hcloud://{}", 40_000_000 + crate::fx::hash(n.name) % 9_000_000),
+                    },
                     addresses: vec![],
                     cloud: None,
                     geo: None,
@@ -219,6 +224,7 @@ impl Sim {
             caps: crate::ops::Caps { argo_rollouts: true, gateway_api: true, cert_manager: true, argocd: true, metrics: true },
             apps: self.ops.apps(),
             metrics: Some(self.metrics()),
+                    infra: Default::default(),
             helm: self.helm(),
             fetched_at: Instant::now(),
             error: None,

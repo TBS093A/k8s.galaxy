@@ -8,6 +8,8 @@ Terminal command center for Kubernetes — Rust + Ratatui. Three live views of a
 | **GALAXY** | `2` | Each node is a star system (control plane = magenta, worker = amber, NotReady = red flicker); pods orbit as planets, one orbit per namespace; failing pods flare red. |
 | **RADAR** | `3` | Rotating sweep with phosphor trail. Healthy nodes on the rim, failing pods/nodes close to the center ("hostile contacts"). |
 
+![Geo map of a live cluster: three Hetzner nodes, links to the control plane, node details and the pod list](docs/screenshots/map.png)
+
 Sidebar: nodes → details → resource list. Bottom ticker: latest `Warning` events.
 
 The resource list is split into namespace sections (with failing/degraded counts) and switches with `t`/`T` between:
@@ -20,9 +22,23 @@ The resource list is split into namespace sections (with failing/degraded counts
 
 Selecting a workload or release highlights its pods in the Galaxy and Radar views.
 
+## Screenshots
+
+Live Hetzner cluster unless marked *demo* (`--demo`, for what that cluster does not run: Argo Rollouts, metrics-server).
+
+| | |
+| --- | --- |
+| ![Cluster picker](docs/screenshots/clusters.png) **Cluster picker** — every context in `~/.kube`, probed | ![Galaxy](docs/screenshots/galaxy.png) **Galaxy** — nodes as stars, pods orbiting per namespace |
+| ![Radar](docs/screenshots/radar.png) **Radar** — failing pods and nodes drift to the center | ![Resource list](docs/screenshots/resources.png) **Resources** — Deployments by namespace, requests vs allocatable |
+| ![Rollouts](docs/screenshots/rollouts.png) **Rollouts** — revisions of a Deployment | ![Argo Rollouts canary](docs/screenshots/demo-argo-rollouts.png) **Argo Rollouts canary** (*demo*) — steps, traffic split |
+| ![Routes](docs/screenshots/net-routes.png) **Routes** — host → service → endpoints, TLS chain | ![Certificates](docs/screenshots/net-certs.png) **Certificates** — expired cert with its failing ACME challenge |
+| ![RBAC](docs/screenshots/rbac.png) **RBAC** — subjects rated by risk | ![Argo CD](docs/screenshots/argo.png) **Argo CD** — sync, health, drift, resources |
+| ![Metrics](docs/screenshots/demo-metrics.png) **Metrics** (*demo*) — load arcs, a node running hot | |
+
 ## Run
 
 ```bash
+cargo run --release                                             # pick a cluster from ~/.kube (see Clusters)
 cargo run --release -- --demo                                   # simulated cluster
 cargo run --release -- --kubeconfig ~/.kube/prod.conf \
   --hcloud-env-file ./infra/.env   # locations from the Hetzner API (file with HCLOUD_TOKEN=...)
@@ -31,7 +47,7 @@ cargo run --release -- --kubeconfig ~/.kube/homelab.conf --home 52.23,21.01
 
 | Flag | |
 | --- | --- |
-| `--kubeconfig PATH` / `--context NAME` | which cluster (defaults: `$KUBECONFIG`/`~/.kube/config`, current context) |
+| `--kubeconfig PATH` / `--context NAME` | open this cluster directly instead of the picker |
 | `--demo` | fake cluster across Hetzner fsn1/nbg1/hel1/ash + homelab in Warsaw |
 | `--home LAT,LON` | where to put nodes that have no location info (homelab) |
 | `--place KEY=LAT,LON` / `--place KEY=PLACE` | pin a node name / region / zone / location key, e.g. `web.node.01=fsn1` (repeatable) |
@@ -42,6 +58,27 @@ cargo run --release -- --kubeconfig ~/.kube/homelab.conf --home 52.23,21.01
 | `--cloud-interval SECS` | inventory refresh (default 300) |
 | `--interval SECS` | poll interval (default 5) |
 | `--fps N` | animation frame rate (default 30) |
+
+## Clusters
+
+Without `--kubeconfig`/`--context`, k8s.galaxy reads every kubeconfig it can find — the files in `$KUBECONFIG`,
+`~/.kube/config` and any other file in `~/.kube/` (backups like `*.bak`, `*.old`, `*~` are skipped) — and lists
+every context. With one cluster it connects right away; with several it opens the **cluster picker**, which is
+also on `c` at any time. Each cluster is probed in the background (read-only: `/version`, nodes,
+ClusterRoleBinding names): reachable or not, Kubernetes version, node count and what it runs on. `Enter`
+switches clusters live, `r` probes again; the last row is the demo.
+
+What it runs on is shown in the picker, as a badge in the header and per node (`infra` in the details panel):
+
+| Badge | Recognised by |
+| --- | --- |
+| `managed EKS` / `GKE` / `AKS` / `DOKS` / `LKE` / `OKE` / `Kapsule` / `OVH MKS` / … | API server host (`*.eks.amazonaws.com`, `*.azmk8s.io`, …), version suffix (`-eks-`, `-gke.`), node-pool labels — and no control-plane nodes visible |
+| `Hetzner Cloud VMs` / `AWS VMs` / … | self-managed control plane on one provider's VMs: node `providerID`, or a match in the cloud inventories (so clusters without a cloud controller are recognised too) |
+| `bare metal` | no node has any cloud provider (also VMs on your own hypervisor) |
+| `local kind` / `minikube` / `k3d` / `Docker Desktop` | dev clusters on this machine |
+| `hybrid: Hetzner Cloud + bare metal` | nodes of several kinds |
+
+plus the distribution where it can be told: `kubespray`, `kubeadm`, `k3s`, `rke2`, `Talos`, `OpenShift`, `MicroK8s`, `Tanzu`.
 
 ## Where a node lands on the map
 
@@ -120,7 +157,7 @@ Traffic, RBAC and Helm refresh every 20 s in a background task (Helm release pay
 
 ## Keys
 
-`1-7`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `r` refresh now · `q` quit
+`1-7`/`Tab` view · `j/k` select · `Enter`/`→` into the list, `Enter` again = open · `t`/`T` list kind · `l` pod logs · `Esc`/`←` back · `+/-` zoom on selected node · `HJKL` pan · `f` fit to nodes · `0` world · `c` clusters · `r` refresh now · `q` quit
 
 ## Layout
 
@@ -134,11 +171,13 @@ src/
   geo.rs      location resolution + region table
   model.rs    snapshot types, health
   gitops.rs   Argo CD Applications, sync/refresh
+  infra.rs    managed / cloud VMs / bare metal / local detection, distributions
+  kubeconfigs.rs  kubeconfig discovery in ~/.kube and $KUBECONFIG, cluster probes
   metrics.rs  metrics-server usage, quantity parsing
   ops.rs      rollouts, traffic (Ingress/Gateway API/cert-manager), RBAC, rollout actions
   demo_ops.rs simulated rollouts/traffic/RBAC for --demo
   fx.rs       colors, fades, pulses, noise — seed of a reusable `tui-fx`
-  ui/         map, galaxy, radar, panels, ops (rollouts/net/rbac views)
+  ui/         map, galaxy, radar, panels, ops (rollouts/net/rbac/argo views), cluster picker
 ```
 
 RBAC needed: `list` on nodes, pods, events, deployments, replicasets, daemonsets, statefulsets (cluster-wide), `get` on `pods/log`, `list` on secrets for the Helm tab (releases are read from `owner=helm` Secrets; without access the tab shows a warning and stays empty). The operations views add `list` on ingresses, services, endpointslices, roles, rolebindings, clusterroles, clusterrolebindings, serviceaccounts, Gateway API / cert-manager / Argo Rollouts objects, Argo CD `applications` (+ `patch` for sync/refresh), `nodes`/`pods` in `metrics.k8s.io`, and `patch` on the workloads (plus `rollouts/status`) for actions.

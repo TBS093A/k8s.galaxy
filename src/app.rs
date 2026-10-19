@@ -4,6 +4,8 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::gitops::{AppAction, AppInfo};
+use crate::kubeconfigs::{ClusterEntry, Probe};
+use crate::source::Target;
 use crate::metrics::Usage;
 use crate::ops::{Action, ActionKind, BindingInfo, CertInfo, GatewayInfo, IssuerInfo, RoleInfo, RolloutInfo, RouteInfo, Subject};
 use crate::model::{Health, HelmRelease, PodInfo, Snapshot, WorkloadInfo, WorkloadKind};
@@ -163,6 +165,23 @@ impl Pending {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum ProbeState {
+    Pending,
+    Ok(Probe),
+    Err(String),
+}
+
+/// Which cluster is shown: an entry of the discovered list, the demo, or one given by flags
+/// that is not in the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Active {
+    Entry(usize),
+    Demo,
+    Other,
+    None,
+}
+
 pub struct Confirm {
     pub pending: Pending,
     pub explain: String,
@@ -302,6 +321,14 @@ pub struct App {
     pub query: Option<String>,
     pub read_only: bool,
     pub dry_run: bool,
+    /// Clusters found in ~/.kube and $KUBECONFIG, their probe results, and the picker cursor
+    /// (rows: the clusters, then the demo).
+    pub clusters: Vec<ClusterEntry>,
+    pub probes: Vec<ProbeState>,
+    pub picker: Option<usize>,
+    pub active: Active,
+    /// Label of the cluster being connected to.
+    pub switching: Option<String>,
     pub cam: Camera,
     pub cam_target: Camera,
     /// Map canvas inner size (cols, rows) from the last frame, for fit-to-nodes.
@@ -333,6 +360,11 @@ impl App {
             query: None,
             read_only: false,
             dry_run: false,
+            clusters: vec![],
+            probes: vec![],
+            picker: None,
+            active: Active::None,
+            switching: None,
             cam: Camera::WORLD,
             cam_target: Camera::WORLD,
             map_size: (120, 40),
@@ -358,6 +390,14 @@ impl App {
         let selected = self.selected_node().map(|n| n.name.clone());
         let selected_res = self.selected_res_any().map(|r| (r.namespace().to_string(), r.name().to_string()));
         let selected_ops = self.selected_ops().map(|o| (o.group(), o.name()));
+        let mut snap = snap;
+        // Until RBAC is loaded the installer cannot be told apart; the probe already knows.
+        if snap.rbac.bindings.is_empty()
+            && let Active::Entry(i) = self.active
+            && let Some(ProbeState::Ok(p)) = self.probes.get(i)
+        {
+            snap.infra = p.infra.clone();
+        }
         self.snap = snap;
         if self.view.is_ops() {
             let items = self.ops_items();
@@ -567,6 +607,93 @@ impl App {
             return None;
         }
         self.ops_items().into_iter().nth(self.ops_selected_idx())
+    }
+
+    pub fn set_clusters(&mut self, clusters: Vec<ClusterEntry>, active: Active) {
+        self.probes = vec![ProbeState::Pending; clusters.len()];
+        self.clusters = clusters;
+        self.active = active;
+    }
+
+    /// Open the cluster picker and (re-)probe every cluster.
+    pub fn open_picker(&mut self) {
+        let start = match self.active {
+            Active::Entry(i) => i,
+            Active::Demo => self.clusters.len(),
+            _ => self.clusters.iter().position(|c| c.default).unwrap_or(0),
+        };
+        self.picker = Some(start);
+        self.probe_all();
+    }
+
+    fn probe_all(&mut self) {
+        self.probes = vec![ProbeState::Pending; self.clusters.len()];
+        let _ = self.cmds.send(Cmd::Probe(self.clusters.iter().cloned().enumerate().collect()));
+    }
+
+    pub fn set_probe(&mut self, index: usize, result: Result<Probe, String>) {
+        if let Some(p) = self.probes.get_mut(index) {
+            *p = match result {
+                Ok(p) => ProbeState::Ok(p),
+                Err(e) => ProbeState::Err(e),
+            };
+        }
+    }
+
+    /// The source switched clusters: start from a clean slate.
+    pub fn switched(&mut self, cluster: String) {
+        self.snap = Snapshot::empty(cluster.clone());
+        self.synced = false;
+        self.fitted_once = false;
+        self.node_idx = 0;
+        self.res_idx = 0;
+        self.ops_idx = [0; 4];
+        self.focus = Focus::Nodes;
+        self.logs = None;
+        self.confirm = None;
+        self.query = None;
+        self.cam = Camera::WORLD;
+        self.cam_target = Camera::WORLD;
+        self.switching = None;
+        self.toast = Some(Toast { text: format!("connected to {cluster}"), ok: true, at: Instant::now() });
+    }
+
+    pub fn switch_failed(&mut self, err: String) {
+        self.switching = None;
+        self.toast = Some(Toast { text: format!("could not connect: {err}"), ok: false, at: Instant::now() });
+        if self.picker.is_none() {
+            self.open_picker();
+        }
+    }
+
+    fn picker_key(&mut self, key: KeyEvent) {
+        let Some(idx) = self.picker else { return };
+        let rows = self.clusters.len() + 1;
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => self.picker = Some((idx + 1) % rows),
+            KeyCode::Up | KeyCode::Char('k') => self.picker = Some((idx + rows - 1) % rows),
+            KeyCode::Char('r') => self.probe_all(),
+            KeyCode::Enter => {
+                let (target, active, label) = match self.clusters.get(idx) {
+                    Some(e) => (Target::Kube(e.clone()), Active::Entry(idx), e.label.clone()),
+                    None => (Target::Demo, Active::Demo, "demo".to_string()),
+                };
+                if active == self.active {
+                    self.picker = None;
+                    return;
+                }
+                let _ = self.cmds.send(Cmd::Switch(target));
+                self.active = active;
+                self.switching = Some(label.clone());
+                self.picker = None;
+                self.toast = Some(Toast { text: format!("connecting to {label}…"), ok: true, at: Instant::now() });
+            }
+            // With nothing connected there is nothing behind the picker to go back to.
+            KeyCode::Esc | KeyCode::Char('q') if self.active == Active::None => self.quit = true,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => self.picker = None,
+            _ => {}
+        }
     }
 
     pub fn action_done(&mut self, res: Result<String, String>) {
@@ -807,6 +934,9 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        if self.picker.is_some() {
+            return self.picker_key(key);
+        }
         if let Some(logs) = &mut self.logs {
             let page = 20;
             match key.code {
@@ -841,6 +971,7 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Esc if self.focus == Focus::Resources => self.focus = Focus::Nodes,
             KeyCode::Esc => self.quit = true,
+            KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) => self.open_picker(),
             KeyCode::Char('1') => self.view = View::Map,
             KeyCode::Char('2') => self.view = View::Galaxy,
             KeyCode::Char('3') => self.view = View::Radar,

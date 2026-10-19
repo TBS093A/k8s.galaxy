@@ -653,7 +653,7 @@ fn rollout_detail(app: &App, r: &RolloutInfo, t: f64, width: usize) -> Vec<Line<
                 }),
                 st(format!("{:>2}/{:<2} ", h.ready, h.replicas), if h.replicas > 0 { TEXT } else { fx::STEEL }),
                 st(format!("{:<6}", h.age), fx::STEEL),
-                st(h.image.rsplit('/').next().unwrap_or(&h.image).to_string(), if h.replicas > 0 { TEXT } else { fx::STEEL }),
+                st(pad(h.image.rsplit('/').next().unwrap_or(&h.image), 40), if h.replicas > 0 { TEXT } else { fx::STEEL }),
             ]));
         }
     }

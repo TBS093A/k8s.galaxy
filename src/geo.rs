@@ -69,6 +69,7 @@ const PLACES: &[(&str, f64, f64, &str)] = &[
     ("westus2", 47.23, -119.85, "Washington"),
 ];
 
+#[derive(Clone)]
 pub struct Resolver {
     /// key (node name / region / zone / location) -> pinned place
     pub overrides: HashMap<String, Place>,

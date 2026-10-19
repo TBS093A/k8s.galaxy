@@ -5,6 +5,8 @@ mod demo_ops;
 mod fx;
 mod geo;
 mod gitops;
+mod infra;
+mod kubeconfigs;
 mod metrics;
 mod model;
 mod ops;
@@ -19,7 +21,7 @@ use anyhow::Result;
 use clap::Parser;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
-use crate::app::App;
+use crate::app::{Active, App};
 use crate::model::Snapshot;
 use crate::source::{Msg, Source};
 
@@ -75,10 +77,33 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let mut source = if args.demo {
-        Source::Demo(demo::Sim::new())
+    // Clusters from $KUBECONFIG, ~/.kube/config and every other kubeconfig in ~/.kube/.
+    let clusters = kubeconfigs::discover();
+    let (mut source, active, picker) = if args.demo {
+        (Source::Demo(demo::Sim::new()), Active::Demo, false)
+    } else if args.kubeconfig.is_some() || args.context.is_some() {
+        let file = args.kubeconfig.as_ref().and_then(|f| f.canonicalize().ok());
+        let active = clusters
+            .iter()
+            .position(|c| {
+                file.as_ref().is_none_or(|f| c.file.canonicalize().ok().as_ref() == Some(f))
+                    && args.context.as_ref().is_none_or(|ctx| *ctx == c.context)
+                    && (args.context.is_some() || file.is_some())
+            })
+            .map_or(Active::Other, Active::Entry);
+        // A cluster from the list keeps its list name; anything else is opened as given.
+        let source = match active {
+            Active::Entry(i) => Source::open(&source::Target::Kube(clusters[i].clone())).await?,
+            _ => Source::connect(args.kubeconfig, args.context).await?,
+        };
+        (source, active, false)
     } else {
-        Source::connect(args.kubeconfig, args.context).await?
+        match clusters.len() {
+            0 => anyhow::bail!("no kubeconfig found in $KUBECONFIG or ~/.kube/ — pass --kubeconfig, or try --demo"),
+            1 => (Source::open(&source::Target::Kube(clusters[0].clone())).await?, Active::Entry(0), false),
+            // Several clusters: let the user pick (the default context is preselected).
+            _ => (Source::Idle, Active::None, true),
+        }
     };
     source.set_dry_run(args.dry_run);
     let providers = match args.cloud {
@@ -106,6 +131,10 @@ async fn main() -> Result<()> {
     tokio::spawn(source::run(source, resolver, Duration::from_secs(args.interval.max(1)), cloud_poll, cmd_rx, msg_tx));
 
     let mut app = App::new(Snapshot::empty(cluster), cmd_tx);
+    app.set_clusters(clusters, active);
+    if picker {
+        app.open_picker();
+    }
     app.read_only = args.read_only;
     app.dry_run = args.dry_run;
     let mut terminal = ratatui::init();
@@ -117,6 +146,9 @@ async fn main() -> Result<()> {
                     Msg::Snapshot(snap) => app.set_snapshot(*snap),
                     Msg::Logs { title, lines } => app.set_logs(title, lines),
                     Msg::ActionDone(res) => app.action_done(res),
+                    Msg::Switched { cluster } => app.switched(cluster),
+                    Msg::SwitchFailed(e) => app.switch_failed(e),
+                    Msg::Probed { index, result } => app.set_probe(index, result),
                 }
             }
             app.tick();

@@ -17,6 +17,8 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::cloud::{self, CloudConfig, CloudInstance};
+use crate::infra;
+use crate::kubeconfigs::{self, ClusterEntry, Probe};
 use crate::demo::Sim;
 use crate::geo::Resolver;
 use crate::gitops::{self, AppAction, AppInfo};
@@ -53,18 +55,53 @@ pub enum Cmd {
     Action(Action),
     AppAction { namespace: String, name: String, action: AppAction },
     Logs { namespace: String, pod: String, container: Option<String> },
+    /// Connect to another cluster (the current one is dropped).
+    Switch(Target),
+    /// Probe these clusters (index in the app's list, entry).
+    Probe(Vec<(usize, ClusterEntry)>),
+}
+
+#[derive(Clone, Debug)]
+pub enum Target {
+    Demo,
+    Kube(ClusterEntry),
 }
 
 pub enum Msg {
     Snapshot(Box<Snapshot>),
     ActionDone(Result<String, String>),
     Logs { title: String, lines: Result<Vec<String>, String> },
+    /// Now showing this cluster (fresh state follows).
+    Switched { cluster: String },
+    SwitchFailed(String),
+    Probed { index: usize, result: Result<Probe, String> },
+}
+
+/// Background task handle that stops the task when the source it belongs to is dropped.
+pub struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 #[allow(clippy::large_enum_variant)] // one long-lived value
 pub enum Source {
-    Kube { client: Client, cluster: String, slow: Shared, wake: Arc<Notify>, dry_run: bool },
+    Kube {
+        client: Client,
+        cluster: String,
+        /// API server URL and version, for telling managed services from self-managed clusters.
+        server: String,
+        version: String,
+        slow: Shared,
+        wake: Arc<Notify>,
+        dry_run: bool,
+        _task: AbortOnDrop,
+    },
     Demo(Sim),
+    /// No cluster chosen yet (the cluster picker is open).
+    Idle,
 }
 
 impl Source {
@@ -78,24 +115,68 @@ impl Source {
             .or_else(|| kc.current_context.clone())
             .or_else(|| kc.contexts.first().map(|c| c.name.clone()))
             .unwrap_or_else(|| "cluster".into());
+        let server = kc
+            .contexts
+            .iter()
+            .find(|c| c.name == cluster)
+            .and_then(|c| c.context.as_ref())
+            .and_then(|c| kc.clusters.iter().find(|cl| cl.name == c.cluster))
+            .and_then(|cl| cl.cluster.as_ref())
+            .and_then(|cl| cl.server.clone())
+            .unwrap_or_default();
         let opts = KubeConfigOptions { context: Some(cluster.clone()), ..Default::default() };
         let config = Config::from_custom_kubeconfig(kc, &opts).await.context("building kube config")?;
         let client = Client::try_from(config)?;
+        Ok(Self::from_client(client, cluster, server).await)
+    }
+
+    /// A cluster from the discovered list, shown under its list label.
+    pub async fn open(target: &Target) -> Result<Self> {
+        match target {
+            Target::Demo => Ok(Source::Demo(Sim::new())),
+            Target::Kube(e) => {
+                let client = kubeconfigs::client_for(&e.file, &e.context, false).await?;
+                Ok(Self::from_client(client, e.label.clone(), e.server.clone()).await)
+            }
+        }
+    }
+
+    async fn from_client(client: Client, cluster: String, server: String) -> Self {
+        let version = tokio::time::timeout(Duration::from_secs(8), client.apiserver_version())
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .map(|v| v.git_version)
+            .unwrap_or_default();
         let slow = Shared::default();
         let wake = Arc::new(Notify::new());
-        tokio::spawn(slow_loop(client.clone(), slow.clone(), wake.clone()));
-        Ok(Source::Kube { client, cluster, slow, wake, dry_run: false })
+        let task = AbortOnDrop(tokio::spawn(slow_loop(client.clone(), slow.clone(), wake.clone())));
+        Source::Kube { client, cluster, server, version, slow, wake, dry_run: false, _task: task }
+    }
+
+    fn server_version(&self) -> (String, String) {
+        match self {
+            Source::Kube { server, version, .. } => (server.clone(), version.clone()),
+            Source::Demo(_) => ("https://demo.local:6443".into(), "v1.34.1".into()),
+            Source::Idle => Default::default(),
+        }
+    }
+
+    fn dry_run(&self) -> bool {
+        matches!(self, Source::Kube { dry_run: true, .. })
     }
 
     pub fn cluster(&self) -> String {
         match self {
             Source::Kube { cluster, .. } => cluster.clone(),
             Source::Demo(_) => "demo-galaxy".into(),
+            Source::Idle => "no cluster selected".into(),
         }
     }
 
     async fn snapshot(&mut self) -> Result<Snapshot> {
         match self {
+            Source::Idle => Ok(Snapshot::empty("no cluster selected".into())),
             Source::Demo(sim) => {
                 sim.step();
                 Ok(sim.snapshot())
@@ -176,6 +257,7 @@ impl Source {
                     caps: slow.crds.caps(),
                     apps: slow.apps.clone(),
                     metrics: slow.metrics.clone(),
+                    infra: Default::default(),
                     fetched_at: Instant::now(),
                     error: None,
                 })
@@ -192,6 +274,7 @@ impl Source {
     async fn perform_app(&mut self, namespace: &str, name: &str, action: AppAction) -> Result<String, String> {
         let done = format!("{} Application {namespace}/{name}", action.label());
         match self {
+            Source::Idle => Err("no cluster selected".into()),
             Source::Demo(sim) => sim.perform_app(namespace, name, action).map(|_| format!("{done} (demo)")),
             Source::Kube { client, slow, dry_run, .. } => {
                 let ar = slow.lock().unwrap().crds.application.clone().ok_or("Argo CD Application CRD not found")?;
@@ -211,6 +294,7 @@ impl Source {
 
     async fn perform(&mut self, action: &Action) -> Result<String, String> {
         match self {
+            Source::Idle => Err("no cluster selected".into()),
             Source::Demo(sim) => sim.perform(action),
             Source::Kube { client, slow, dry_run, .. } => {
                 let crds = slow.lock().unwrap().crds.clone();
@@ -221,6 +305,7 @@ impl Source {
 
     async fn logs(&self, namespace: &str, pod: &str, container: Option<String>) -> Result<Vec<String>, String> {
         match self {
+            Source::Idle => Err("no cluster selected".into()),
             Source::Demo(sim) => Ok(sim.logs(pod)),
             Source::Kube { client, .. } => {
                 let params = LogParams { tail_lines: Some(500), container, ..Default::default() };
@@ -252,41 +337,47 @@ pub async fn run(
     let mut cloud_errors: Vec<EventInfo> = vec![];
     let mut cloud_at: Option<Instant> = None;
     loop {
-        let snap = match tokio::time::timeout(Duration::from_secs(25), source.snapshot()).await {
-            Ok(Ok(mut snap)) => {
-                // Provider inventories change rarely; refresh them on their own, slower clock.
-                if cloud_at.is_none_or(|t| t.elapsed() >= cloud_poll.interval) {
-                    cloud_at = Some(Instant::now());
-                    let (list, errors) = cloud::inventory(&cloud_poll.config, &snap.nodes).await;
-                    instances = list;
-                    cloud_errors = errors
-                        .into_iter()
-                        .map(|(p, e)| EventInfo {
-                            reason: "CloudAPI".into(),
-                            object: format!("provider/{p}"),
-                            message: e.replace('\n', " "),
-                            count: 1,
-                        })
-                        .collect();
+        // Nothing to poll while no cluster is chosen: only serve commands (switch, probe).
+        if !matches!(source, Source::Idle) {
+            let snap = match tokio::time::timeout(Duration::from_secs(25), source.snapshot()).await {
+                Ok(Ok(mut snap)) => {
+                    // Provider inventories change rarely; refresh them on their own, slower clock.
+                    if cloud_at.is_none_or(|t| t.elapsed() >= cloud_poll.interval) {
+                        cloud_at = Some(Instant::now());
+                        let (list, errors) = cloud::inventory(&cloud_poll.config, &snap.nodes).await;
+                        instances = list;
+                        cloud_errors = errors
+                            .into_iter()
+                            .map(|(p, e)| EventInfo {
+                                reason: "CloudAPI".into(),
+                                object: format!("provider/{p}"),
+                                message: e.replace('\n', " "),
+                                count: 1,
+                            })
+                            .collect();
+                    }
+                    snap.warnings.splice(0..0, cloud_errors.iter().cloned());
+                    snap.nodes.iter_mut().for_each(|n| resolver.apply(n, &instances));
+                    snap.nodes.sort_by(|a, b| (&a.place, &a.name).cmp(&(&b.place, &b.name)));
+                    let (server, version) = source.server_version();
+                    let hints: Vec<String> = snap.rbac.bindings.iter().filter(|b| b.cluster).map(|b| b.name.clone()).collect();
+                    snap.infra = infra::classify(&server, &version, &snap.nodes, &hints);
+                    last_good = Some(snap.clone());
+                    snap
                 }
-                snap.warnings.splice(0..0, cloud_errors.iter().cloned());
-                snap.nodes.iter_mut().for_each(|n| resolver.apply(n, &instances));
-                snap.nodes.sort_by(|a, b| (&a.place, &a.name).cmp(&(&b.place, &b.name)));
-                last_good = Some(snap.clone());
-                snap
+                failure => {
+                    let err = match failure {
+                        Ok(Err(e)) => format!("{e:#}"),
+                        _ => "timeout talking to API server".into(),
+                    };
+                    let mut snap = last_good.clone().unwrap_or_else(|| Snapshot::empty(source.cluster()));
+                    snap.error = Some(err);
+                    snap
+                }
+            };
+            if tx.send(Msg::Snapshot(Box::new(snap))).is_err() {
+                return;
             }
-            failure => {
-                let err = match failure {
-                    Ok(Err(e)) => format!("{e:#}"),
-                    _ => "timeout talking to API server".into(),
-                };
-                let mut snap = last_good.clone().unwrap_or_else(|| Snapshot::empty(source.cluster()));
-                snap.error = Some(err);
-                snap
-            }
-        };
-        if tx.send(Msg::Snapshot(Box::new(snap))).is_err() {
-            return;
         }
 
         // Wait for the next tick, serving commands meanwhile.
@@ -299,6 +390,37 @@ pub async fn run(
                     Some(Cmd::Refresh) => {
                         source.wake();
                         break;
+                    }
+                    Some(Cmd::Switch(target)) => {
+                        let dry_run = source.dry_run();
+                        match Source::open(&target).await {
+                            Ok(mut new) => {
+                                new.set_dry_run(dry_run);
+                                source = new;
+                                last_good = None;
+                                instances.clear();
+                                cloud_errors.clear();
+                                cloud_at = None;
+                                if tx.send(Msg::Switched { cluster: source.cluster() }).is_err() {
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                if tx.send(Msg::SwitchFailed(format!("{e:#}"))).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    Some(Cmd::Probe(entries)) => {
+                        for (index, entry) in entries {
+                            let (tx, cfg, resolver) = (tx.clone(), cloud_poll.config.clone(), resolver.clone());
+                            tokio::spawn(async move {
+                                let result = probe(&entry, &cfg, &resolver).await.map_err(|e| format!("{e:#}"));
+                                let _ = tx.send(Msg::Probed { index, result });
+                            });
+                        }
                     }
                     Some(Cmd::AppAction { namespace, name, action }) => {
                         let res = source.perform_app(&namespace, &name, action).await;
@@ -325,6 +447,19 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Reachability, version and hosting of one cluster. Nodes are matched against the cloud
+/// inventories first, so self-managed clusters on cloud VMs without a cloud controller (no
+/// providerID) are still recognised as such.
+async fn probe(entry: &ClusterEntry, cfg: &CloudConfig, resolver: &Resolver) -> Result<Probe> {
+    let (version, nodes, hints) = tokio::time::timeout(Duration::from_secs(12), kubeconfigs::probe_raw(entry))
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out"))??;
+    let mut nodes: Vec<NodeInfo> = nodes.into_iter().map(node_info).collect();
+    let (instances, _) = tokio::time::timeout(Duration::from_secs(15), cloud::inventory(cfg, &nodes)).await.unwrap_or_default();
+    nodes.iter_mut().for_each(|n| resolver.apply(n, &instances));
+    Ok(Probe { nodes: nodes.len(), infra: infra::classify(&entry.server, &version, &nodes, &hints), version })
 }
 
 fn node_info(node: Node) -> NodeInfo {
@@ -358,6 +493,7 @@ fn node_info(node: Node) -> NodeInfo {
         cpu: capacity.get("cpu").map(|q| q.0.clone()).unwrap_or_default(),
         memory: capacity.get("memory").map(|q| human_bytes(&q.0)).unwrap_or_default(),
         allocatable,
+        os_image: status.node_info.as_ref().map(|i| i.os_image.clone()).unwrap_or_default(),
         kubelet: status.node_info.map(|i| i.kubelet_version).unwrap_or_default(),
         internal_ip: addresses
             .iter()

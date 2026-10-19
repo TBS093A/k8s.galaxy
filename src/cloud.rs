@@ -63,6 +63,7 @@ pub struct CloudInstance {
     pub city: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct CloudConfig {
     /// Explicit provider list; `None` = auto-detect.
     pub providers: Option<Vec<Provider>>,
