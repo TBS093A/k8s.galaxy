@@ -32,7 +32,17 @@ fn rev(revision: i64, hash: &str, image: &str, replicas: i32, ready: i32, age: &
 }
 
 #[allow(clippy::too_many_arguments)]
-fn ro(kind: RolloutKind, ns: &str, name: &str, strategy: &str, desired: i32, updated: i32, ready: i32, phase: Phase, image: &str) -> RolloutInfo {
+fn ro(
+    kind: RolloutKind,
+    ns: &str,
+    name: &str,
+    strategy: &str,
+    desired: i32,
+    updated: i32,
+    ready: i32,
+    phase: Phase,
+    image: &str,
+) -> RolloutInfo {
     RolloutInfo {
         kind,
         namespace: ns.into(),
@@ -74,7 +84,17 @@ impl OpsSim {
         ];
         rollouts.push(DemoRollout { info: canary, timer: 3 });
 
-        let mut bg = ro(Argo, "search", "search-api", "BlueGreen active=search-api preview=search-api-preview", 2, 2, 2, Paused, "registry.local/search-api:0.9.1");
+        let mut bg = ro(
+            Argo,
+            "search",
+            "search-api",
+            "BlueGreen active=search-api preview=search-api-preview",
+            2,
+            2,
+            2,
+            Paused,
+            "registry.local/search-api:0.9.1",
+        );
         bg.revision = 5;
         bg.message = "BlueGreenPause: waiting for promotion of preview".into();
         bg.history = vec![
@@ -113,7 +133,8 @@ impl OpsSim {
         ];
         rollouts.push(DemoRollout { info: argocd, timer: 0 });
 
-        let mut nginx = ro(Deployment, "ingress", "ingress-nginx", rolling, 3, 3, 3, Complete, "registry.k8s.io/ingress-nginx/controller:v1.13.2");
+        let mut nginx =
+            ro(Deployment, "ingress", "ingress-nginx", rolling, 3, 3, 3, Complete, "registry.k8s.io/ingress-nginx/controller:v1.13.2");
         nginx.revision = 9;
         nginx.history = vec![
             rev(9, "79b6d5c8f", "registry.k8s.io/ingress-nginx/controller:v1.13.2", 3, 3, "4d", None),
@@ -122,7 +143,8 @@ impl OpsSim {
         ];
         rollouts.push(DemoRollout { info: nginx, timer: 0 });
 
-        let mut cilium = ro(DaemonSet, "kube-system", "cilium", "RollingUpdate unavail 1", 7, 5, 6, Progressing, "quay.io/cilium/cilium:v1.18.2");
+        let mut cilium =
+            ro(DaemonSet, "kube-system", "cilium", "RollingUpdate unavail 1", 7, 5, 6, Progressing, "quay.io/cilium/cilium:v1.18.2");
         cilium.revision = 4;
         cilium.history = vec![
             rev(4, "7c9d4b5f8", "quay.io/cilium/cilium:v1.18.2", 5, 5, "3m", None),
@@ -155,7 +177,10 @@ impl OpsSim {
         ] {
             let mut r = ro(Deployment, ns, name, rolling, n, n, n, Complete, &format!("registry.local/{name}:1.4.2"));
             r.revision = 3;
-            r.history = vec![rev(3, "5d4c3b2a1", &r.image.clone(), n, n, "8d", None), rev(2, "4c3b2a190", "registry.local/old:1.4.1", 0, 0, "40d", None)];
+            r.history = vec![
+                rev(3, "5d4c3b2a1", &r.image.clone(), n, n, "8d", None),
+                rev(2, "4c3b2a190", "registry.local/old:1.4.1", 0, 0, "40d", None),
+            ];
             rollouts.push(DemoRollout { info: r, timer: 0 });
         }
 
@@ -387,7 +412,17 @@ fn backend(host: &str, path: &str, svc: &str, port: &str, endpoints: Option<(usi
 }
 
 #[allow(clippy::too_many_arguments)]
-fn cert(ns: &str, name: &str, secret: &str, dns: &[&str], issuer: &str, ready: bool, days: Option<i64>, reason: &str, message: &str) -> CertInfo {
+fn cert(
+    ns: &str,
+    name: &str,
+    secret: &str,
+    dns: &[&str],
+    issuer: &str,
+    ready: bool,
+    days: Option<i64>,
+    reason: &str,
+    message: &str,
+) -> CertInfo {
     CertInfo {
         namespace: ns.into(),
         name: name.into(),
@@ -406,24 +441,107 @@ fn cert(ns: &str, name: &str, secret: &str, dns: &[&str], issuer: &str, ready: b
 
 fn demo_net() -> NetInfo {
     let le = "ClusterIssuer/letsencrypt-prod";
-    let mut kibana = cert("monitoring", "kibana-tls", "kibana-tls", &["kibana.example.com"], le, false, None, "DoesNotExist", "Issuing certificate as Secret does not exist");
-    kibana.challenges = vec!["http-01 kibana.example.com: pending — Waiting for HTTP-01 challenge propagation: wrong status code '404', expected '200'".into()];
+    let mut kibana = cert(
+        "monitoring",
+        "kibana-tls",
+        "kibana-tls",
+        &["kibana.example.com"],
+        le,
+        false,
+        None,
+        "DoesNotExist",
+        "Issuing certificate as Secret does not exist",
+    );
+    kibana.challenges = vec![
+        "http-01 kibana.example.com: pending — Waiting for HTTP-01 challenge propagation: wrong status code '404', expected '200'".into(),
+    ];
     let certs = vec![
-        cert("argocd", "argocd-server-tls", "argocd-server-tls", &["argocd.example.com"], le, true, Some(61), "Ready", "Certificate is up to date and has not expired"),
-        cert("monitoring", "grafana-tls", "grafana-tls", &["grafana.example.com"], le, true, Some(5), "Ready", "Certificate is up to date and has not expired"),
+        cert(
+            "argocd",
+            "argocd-server-tls",
+            "argocd-server-tls",
+            &["argocd.example.com"],
+            le,
+            true,
+            Some(61),
+            "Ready",
+            "Certificate is up to date and has not expired",
+        ),
+        cert(
+            "monitoring",
+            "grafana-tls",
+            "grafana-tls",
+            &["grafana.example.com"],
+            le,
+            true,
+            Some(5),
+            "Ready",
+            "Certificate is up to date and has not expired",
+        ),
         kibana,
-        cert("infra", "wildcard-example", "wildcard-tls", &["*.example.com", "example.com"], "ClusterIssuer/letsencrypt-dns", true, Some(74), "Ready", "Certificate is up to date and has not expired"),
-        cert("shop", "api-tls", "api-tls", &["api.example.com"], le, true, Some(33), "Ready", "Certificate is up to date and has not expired"),
-        cert("search", "qdrant-internal", "qdrant-internal-tls", &["qdrant.search.svc"], "Issuer/internal-ca", true, Some(340), "Ready", "Certificate is up to date and has not expired"),
+        cert(
+            "infra",
+            "wildcard-example",
+            "wildcard-tls",
+            &["*.example.com", "example.com"],
+            "ClusterIssuer/letsencrypt-dns",
+            true,
+            Some(74),
+            "Ready",
+            "Certificate is up to date and has not expired",
+        ),
+        cert(
+            "shop",
+            "api-tls",
+            "api-tls",
+            &["api.example.com"],
+            le,
+            true,
+            Some(33),
+            "Ready",
+            "Certificate is up to date and has not expired",
+        ),
+        cert(
+            "search",
+            "qdrant-internal",
+            "qdrant-internal-tls",
+            &["qdrant.search.svc"],
+            "Issuer/internal-ca",
+            true,
+            Some(340),
+            "Ready",
+            "Certificate is up to date and has not expired",
+        ),
     ];
     let gateway = GatewayInfo {
         namespace: "infra".into(),
         name: "public-gw".into(),
         class: "cilium".into(),
         listeners: vec![
-            Listener { name: "https".into(), protocol: "HTTPS".into(), port: 443, hostname: "*.example.com".into(), tls_secret: Some("wildcard-tls".into()), attached: 2 },
-            Listener { name: "http".into(), protocol: "HTTP".into(), port: 80, hostname: "*.example.com".into(), tls_secret: None, attached: 1 },
-            Listener { name: "grpc".into(), protocol: "HTTPS".into(), port: 8443, hostname: "grpc.example.com".into(), tls_secret: Some("wildcard-tls".into()), attached: 1 },
+            Listener {
+                name: "https".into(),
+                protocol: "HTTPS".into(),
+                port: 443,
+                hostname: "*.example.com".into(),
+                tls_secret: Some("wildcard-tls".into()),
+                attached: 2,
+            },
+            Listener {
+                name: "http".into(),
+                protocol: "HTTP".into(),
+                port: 80,
+                hostname: "*.example.com".into(),
+                tls_secret: None,
+                attached: 1,
+            },
+            Listener {
+                name: "grpc".into(),
+                protocol: "HTTPS".into(),
+                port: 8443,
+                hostname: "grpc.example.com".into(),
+                tls_secret: Some("wildcard-tls".into()),
+                attached: 1,
+            },
         ],
         addresses: vec!["49.13.77.10".into()],
         programmed: true,
@@ -441,9 +559,27 @@ fn demo_net() -> NetInfo {
         problems: vec![],
     };
     let routes = vec![
-        ing("argocd", "argocd-server", &["argocd.example.com"], vec![backend("argocd.example.com", "/", "argocd-server", "443", Some((1, 2)))], Some("argocd-server-tls")),
-        ing("monitoring", "grafana", &["grafana.example.com"], vec![backend("grafana.example.com", "/", "grafana", "3000", Some((3, 3)))], Some("grafana-tls")),
-        ing("monitoring", "kibana", &["kibana.example.com"], vec![backend("kibana.example.com", "/", "kibana-kb-http", "5601", None)], Some("kibana-tls")),
+        ing(
+            "argocd",
+            "argocd-server",
+            &["argocd.example.com"],
+            vec![backend("argocd.example.com", "/", "argocd-server", "443", Some((1, 2)))],
+            Some("argocd-server-tls"),
+        ),
+        ing(
+            "monitoring",
+            "grafana",
+            &["grafana.example.com"],
+            vec![backend("grafana.example.com", "/", "grafana", "3000", Some((3, 3)))],
+            Some("grafana-tls"),
+        ),
+        ing(
+            "monitoring",
+            "kibana",
+            &["kibana.example.com"],
+            vec![backend("kibana.example.com", "/", "kibana-kb-http", "5601", None)],
+            Some("kibana-tls"),
+        ),
         ing(
             "shop",
             "checkout",
@@ -474,7 +610,10 @@ fn demo_net() -> NetInfo {
             name: "catalog".into(),
             class: "infra/public-gw:https".into(),
             hosts: vec!["catalog.example.com".into()],
-            backends: vec![backend("catalog.example.com", "/api", "catalog-api", "8080", Some((2, 2))), backend("catalog.example.com", "/", "catalog-web", "80", None)],
+            backends: vec![
+                backend("catalog.example.com", "/api", "catalog-api", "8080", Some((2, 2))),
+                backend("catalog.example.com", "/", "catalog-web", "80", None),
+            ],
             tls: vec![("wildcard-tls".into(), vec!["*.example.com".into()])],
             address: "49.13.77.10".into(),
             problems: vec!["ResolvedRefs: BackendNotFound — Service \"catalog-web\" not found".into()],
@@ -500,12 +639,34 @@ fn demo_net() -> NetInfo {
         message: message.into(),
     };
     let issuers = vec![
-        issuer(true, "", "letsencrypt-prod", "acme acme-v02.api.letsencrypt.org [http01]", true, "The ACME account was registered with the ACME server"),
-        issuer(true, "", "letsencrypt-dns", "acme acme-v02.api.letsencrypt.org [dns01]", true, "The ACME account was registered with the ACME server"),
-        issuer(true, "", "letsencrypt-staging", "acme acme-staging-v02.api.letsencrypt.org [http01]", true, "The ACME account was registered with the ACME server"),
+        issuer(
+            true,
+            "",
+            "letsencrypt-prod",
+            "acme acme-v02.api.letsencrypt.org [http01]",
+            true,
+            "The ACME account was registered with the ACME server",
+        ),
+        issuer(
+            true,
+            "",
+            "letsencrypt-dns",
+            "acme acme-v02.api.letsencrypt.org [dns01]",
+            true,
+            "The ACME account was registered with the ACME server",
+        ),
+        issuer(
+            true,
+            "",
+            "letsencrypt-staging",
+            "acme acme-staging-v02.api.letsencrypt.org [http01]",
+            true,
+            "The ACME account was registered with the ACME server",
+        ),
         issuer(false, "search", "internal-ca", "ca", true, "Signing CA verified"),
     ];
-    let mut tls_secrets: std::collections::BTreeSet<(String, String)> = certs.iter().filter(|c| c.ready).map(|c| (c.namespace.clone(), c.secret.clone())).collect();
+    let mut tls_secrets: std::collections::BTreeSet<(String, String)> =
+        certs.iter().filter(|c| c.ready).map(|c| (c.namespace.clone(), c.secret.clone())).collect();
     // Listener certs live in the gateway namespace but are referenced from routes in other namespaces.
     for ns in ["shop", "catalog", "search"] {
         tls_secrets.insert((ns.into(), "wildcard-tls".into()));
@@ -527,7 +688,13 @@ fn rule(groups: &[&str], resources: &[&str], verbs: &[&str]) -> Rule {
 }
 
 fn demo_rbac() -> RbacInfo {
-    let role = |cluster: bool, ns: &str, name: &str, rules: Vec<Rule>| RoleInfo { cluster, namespace: ns.into(), name: name.into(), rules, aggregated: false };
+    let role = |cluster: bool, ns: &str, name: &str, rules: Vec<Rule>| RoleInfo {
+        cluster,
+        namespace: ns.into(),
+        name: name.into(),
+        rules,
+        aggregated: false,
+    };
     let subj = |kind: &str, name: &str, ns: &str| Subject { kind: kind.into(), name: name.into(), namespace: ns.into() };
     let binding = |cluster: bool, ns: &str, name: &str, role_cluster: bool, role: &str, subjects: Vec<Subject>| BindingInfo {
         cluster,
@@ -540,12 +707,48 @@ fn demo_rbac() -> RbacInfo {
     let read = ["get", "list", "watch"];
     let roles = vec![
         role(true, "", "cluster-admin", vec![rule(&["*"], &["*"], &["*"])]),
-        role(true, "", "admin", vec![rule(&["", "apps"], &["*"], &["*"]), rule(&["rbac.authorization.k8s.io"], &["roles", "rolebindings"], &["create", "update", "patch", "delete"])]),
-        role(true, "", "edit", vec![rule(&["", "apps", "batch"], &["pods", "deployments", "services", "configmaps", "jobs"], &["get", "list", "watch", "create", "update", "patch", "delete"]), rule(&[""], &["pods/exec"], &["create"])]),
+        role(
+            true,
+            "",
+            "admin",
+            vec![
+                rule(&["", "apps"], &["*"], &["*"]),
+                rule(&["rbac.authorization.k8s.io"], &["roles", "rolebindings"], &["create", "update", "patch", "delete"]),
+            ],
+        ),
+        role(
+            true,
+            "",
+            "edit",
+            vec![
+                rule(
+                    &["", "apps", "batch"],
+                    &["pods", "deployments", "services", "configmaps", "jobs"],
+                    &["get", "list", "watch", "create", "update", "patch", "delete"],
+                ),
+                rule(&[""], &["pods/exec"], &["create"]),
+            ],
+        ),
         role(true, "", "view", vec![rule(&["", "apps"], &["pods", "deployments", "services", "configmaps"], &read)]),
         role(true, "", "prometheus", vec![rule(&[""], &["nodes", "nodes/metrics", "services", "endpoints", "pods"], &read)]),
-        role(true, "", "argo-rollouts", vec![rule(&["argoproj.io"], &["rollouts", "rollouts/status", "analysisruns"], &["*"]), rule(&["apps"], &["replicasets"], &["get", "list", "watch", "create", "update", "patch", "delete"])]),
-        role(true, "", "cert-manager-controller-certificates", vec![rule(&["cert-manager.io"], &["certificates", "certificaterequests"], &["*"]), rule(&[""], &["secrets"], &["get", "list", "watch", "create", "update", "delete"])]),
+        role(
+            true,
+            "",
+            "argo-rollouts",
+            vec![
+                rule(&["argoproj.io"], &["rollouts", "rollouts/status", "analysisruns"], &["*"]),
+                rule(&["apps"], &["replicasets"], &["get", "list", "watch", "create", "update", "patch", "delete"]),
+            ],
+        ),
+        role(
+            true,
+            "",
+            "cert-manager-controller-certificates",
+            vec![
+                rule(&["cert-manager.io"], &["certificates", "certificaterequests"], &["*"]),
+                rule(&[""], &["secrets"], &["get", "list", "watch", "create", "update", "delete"]),
+            ],
+        ),
         role(false, "shop", "secrets-reader", vec![rule(&[""], &["secrets"], &["get", "list"])]),
         role(false, "ci", "deployer", vec![rule(&["apps"], &["deployments"], &["get", "patch", "update"])]),
     ];
@@ -553,10 +756,24 @@ fn demo_rbac() -> RbacInfo {
         binding(true, "", "cluster-admin", true, "cluster-admin", vec![subj("Group", "system:masters", "")]),
         binding(true, "", "admins", true, "cluster-admin", vec![subj("User", "admin@example.com", "")]),
         binding(true, "", "jenkins-admin", true, "cluster-admin", vec![subj("ServiceAccount", "jenkins", "ci")]),
-        binding(true, "", "argocd-application-controller", true, "cluster-admin", vec![subj("ServiceAccount", "argocd-application-controller", "argocd")]),
+        binding(
+            true,
+            "",
+            "argocd-application-controller",
+            true,
+            "cluster-admin",
+            vec![subj("ServiceAccount", "argocd-application-controller", "argocd")],
+        ),
         binding(true, "", "prometheus", true, "prometheus", vec![subj("ServiceAccount", "prometheus", "monitoring")]),
         binding(true, "", "argo-rollouts", true, "argo-rollouts", vec![subj("ServiceAccount", "argo-rollouts", "argo-rollouts")]),
-        binding(true, "", "cert-manager-controller-certificates", true, "cert-manager-controller-certificates", vec![subj("ServiceAccount", "cert-manager", "cert-manager")]),
+        binding(
+            true,
+            "",
+            "cert-manager-controller-certificates",
+            true,
+            "cert-manager-controller-certificates",
+            vec![subj("ServiceAccount", "cert-manager", "cert-manager")],
+        ),
         binding(true, "", "devs-view", true, "view", vec![subj("Group", "developers", "")]),
         binding(false, "shop", "devs-edit", true, "edit", vec![subj("Group", "developers", ""), subj("User", "alice@example.com", "")]),
         binding(false, "shop", "default-secrets", false, "secrets-reader", vec![subj("ServiceAccount", "default", "shop")]),
@@ -579,11 +796,27 @@ fn demo_rbac() -> RbacInfo {
 }
 
 fn res(kind: &str, ns: &str, name: &str, sync: &str, health: &str) -> AppResource {
-    AppResource { kind: kind.into(), namespace: ns.into(), name: name.into(), sync: sync.into(), health: health.into(), message: String::new() }
+    AppResource {
+        kind: kind.into(),
+        namespace: ns.into(),
+        name: name.into(),
+        sync: sync.into(),
+        health: health.into(),
+        message: String::new(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn app(project: &str, name: &str, sync: &str, health: &str, source: &str, dest_ns: &str, auto: bool, resources: Vec<AppResource>) -> AppInfo {
+fn app(
+    project: &str,
+    name: &str,
+    sync: &str,
+    health: &str,
+    source: &str,
+    dest_ns: &str,
+    auto: bool,
+    resources: Vec<AppResource>,
+) -> AppInfo {
     AppInfo {
         namespace: "argocd".into(),
         name: name.into(),
@@ -608,47 +841,138 @@ fn app(project: &str, name: &str, sync: &str, health: &str, source: &str, dest_n
 
 fn demo_apps() -> Vec<DemoApp> {
     let repo = "acme/platform-gitops";
-    let ok = |kind: &str, ns: &str, name: &str| res(kind, ns, name, "Synced", if matches!(kind, "Deployment" | "StatefulSet" | "Service" | "Ingress" | "PersistentVolumeClaim") { "Healthy" } else { "" });
+    let ok = |kind: &str, ns: &str, name: &str| {
+        res(
+            kind,
+            ns,
+            name,
+            "Synced",
+            if matches!(kind, "Deployment" | "StatefulSet" | "Service" | "Ingress" | "PersistentVolumeClaim") { "Healthy" } else { "" },
+        )
+    };
     let mut list = vec![];
     let mut push = |info: AppInfo, timer: u32, broken: bool| list.push(DemoApp { info, timer, broken });
 
-    push(app("default", "app-of-apps", "Synced", "Healthy", &format!("{repo} kubernetes/argocd@master"), "argocd", true,
-        ["infrastructure", "monitoring", "checkout-api", "storefront", "search", "catalog", "qdrant"].iter().map(|n| ok("Application", "argocd", n)).collect()), 0, false);
-    push(app("infrastructure", "infrastructure", "Synced", "Healthy", &format!("{repo} kubernetes/infrastructure@master"), "kube-system", true,
-        vec![ok("Namespace", "", "ingress"), ok("Deployment", "ingress", "ingress-nginx"), ok("ClusterIssuer", "", "letsencrypt-prod"), ok("Deployment", "cert-manager", "cert-manager")]), 0, false);
+    push(
+        app(
+            "default",
+            "app-of-apps",
+            "Synced",
+            "Healthy",
+            &format!("{repo} kubernetes/argocd@master"),
+            "argocd",
+            true,
+            ["infrastructure", "monitoring", "checkout-api", "storefront", "search", "catalog", "qdrant"]
+                .iter()
+                .map(|n| ok("Application", "argocd", n))
+                .collect(),
+        ),
+        0,
+        false,
+    );
+    push(
+        app(
+            "infrastructure",
+            "infrastructure",
+            "Synced",
+            "Healthy",
+            &format!("{repo} kubernetes/infrastructure@master"),
+            "kube-system",
+            true,
+            vec![
+                ok("Namespace", "", "ingress"),
+                ok("Deployment", "ingress", "ingress-nginx"),
+                ok("ClusterIssuer", "", "letsencrypt-prod"),
+                ok("Deployment", "cert-manager", "cert-manager"),
+            ],
+        ),
+        0,
+        false,
+    );
 
-    let mut mon = app("infrastructure", "monitoring", "OutOfSync", "Healthy", "prometheus-community.github.io chart kube-prometheus-stack@65.1.1", "monitoring", false,
+    let mut mon = app(
+        "infrastructure",
+        "monitoring",
+        "OutOfSync",
+        "Healthy",
+        "prometheus-community.github.io chart kube-prometheus-stack@65.1.1",
+        "monitoring",
+        false,
         vec![
             res("ConfigMap", "monitoring", "grafana-dashboards", "OutOfSync", ""),
             res("PrometheusRule", "monitoring", "node-alerts", "OutOfSync", ""),
             ok("Deployment", "monitoring", "grafana"),
             ok("StatefulSet", "monitoring", "prometheus"),
             ok("Service", "monitoring", "grafana"),
-        ]);
+        ],
+    );
     mon.sources.push(format!("{repo} ref $values@master"));
     mon.op_when = "6d".into();
     push(mon, 0, false);
 
-    let mut backend = app("backend-apps", "checkout-api", "Synced", "Progressing", &format!("{repo} kubernetes/apps/checkout-api@master"), "shop", true,
-        vec![ok("Deployment", "shop", "checkout-api"), ok("Service", "shop", "checkout-api"), res("Rollout", "shop", "checkout-api", "Synced", "Progressing")]);
+    let mut backend = app(
+        "backend-apps",
+        "checkout-api",
+        "Synced",
+        "Progressing",
+        &format!("{repo} kubernetes/apps/checkout-api@master"),
+        "shop",
+        true,
+        vec![
+            ok("Deployment", "shop", "checkout-api"),
+            ok("Service", "shop", "checkout-api"),
+            res("Rollout", "shop", "checkout-api", "Synced", "Progressing"),
+        ],
+    );
     backend.op_phase = Some("Running".into());
     backend.op_message = "waiting for healthy state of argoproj.io/Rollout/checkout-api".into();
     backend.op_when = "40s".into();
     push(backend, 4, false);
 
-    let mut frontend = app("frontend-apps", "storefront", "OutOfSync", "Healthy", &format!("{repo} kubernetes/apps/storefront@master"), "shop", true,
-        vec![res("Deployment", "shop", "storefront", "OutOfSync", "Healthy"), ok("Service", "shop", "storefront"), ok("Ingress", "shop", "storefront")]);
+    let mut frontend = app(
+        "frontend-apps",
+        "storefront",
+        "OutOfSync",
+        "Healthy",
+        &format!("{repo} kubernetes/apps/storefront@master"),
+        "shop",
+        true,
+        vec![
+            res("Deployment", "shop", "storefront", "OutOfSync", "Healthy"),
+            ok("Service", "shop", "storefront"),
+            ok("Ingress", "shop", "storefront"),
+        ],
+    );
     frontend.health_message = "replicas changed by hand (kubectl scale) — self-heal will revert".into();
     push(frontend, 9, false);
 
-    let mut argocd = app("default", "argocd", "Synced", "Degraded", "argoproj.github.io chart argo-cd@7.6.12", "argocd", true,
-        vec![res("Deployment", "argocd", "argocd-server", "Synced", "Degraded"), ok("StatefulSet", "argocd", "argocd-application-controller")]);
+    let mut argocd = app(
+        "default",
+        "argocd",
+        "Synced",
+        "Degraded",
+        "argoproj.github.io chart argo-cd@7.6.12",
+        "argocd",
+        true,
+        vec![
+            res("Deployment", "argocd", "argocd-server", "Synced", "Degraded"),
+            ok("StatefulSet", "argocd", "argocd-application-controller"),
+        ],
+    );
     argocd.resources[0].message = "Deployment \"argocd-server\" exceeded its progress deadline".into();
     argocd.health_message = "Deployment \"argocd-server\" exceeded its progress deadline".into();
     push(argocd, 0, false);
 
-    let mut search = app("backend-apps", "search", "OutOfSync", "Healthy", &format!("{repo} kubernetes/apps/search@master"), "search", false,
-        vec![res("Deployment", "search", "search-api", "OutOfSync", "Healthy"), ok("Service", "search", "search-api")]);
+    let mut search = app(
+        "backend-apps",
+        "search",
+        "OutOfSync",
+        "Healthy",
+        &format!("{repo} kubernetes/apps/search@master"),
+        "search",
+        false,
+        vec![res("Deployment", "search", "search-api", "OutOfSync", "Healthy"), ok("Service", "search", "search-api")],
+    );
     search.op_phase = Some("Failed".into());
     search.op_message = "one or more objects failed to apply, reason: Deployment.apps \"search-api\" is invalid: spec.template.spec.containers[0].image: Required value".into();
     search.op_by = "alice@example.com".into();
@@ -656,15 +980,39 @@ fn demo_apps() -> Vec<DemoApp> {
     search.conditions = vec!["SyncError: Failed sync attempt to 9b1e2c4: one or more objects failed to apply".into()];
     push(search, 0, true);
 
-    let mut voiv = app("backend-apps", "catalog", "OutOfSync", "Missing", &format!("{repo} kubernetes/apps/catalog@master"), "catalog", false,
-        vec![res("Deployment", "catalog", "catalog-web", "OutOfSync", "Missing"), res("Service", "catalog", "catalog-web", "OutOfSync", "Missing")]);
+    let mut voiv = app(
+        "backend-apps",
+        "catalog",
+        "OutOfSync",
+        "Missing",
+        &format!("{repo} kubernetes/apps/catalog@master"),
+        "catalog",
+        false,
+        vec![
+            res("Deployment", "catalog", "catalog-web", "OutOfSync", "Missing"),
+            res("Service", "catalog", "catalog-web", "OutOfSync", "Missing"),
+        ],
+    );
     voiv.op_phase = None;
     voiv.op_message = String::new();
     voiv.op_when = String::new();
     push(voiv, 0, false);
 
     for (project, name, ns) in [("databases", "qdrant", "search"), ("databases", "postgres", "shop"), ("databases", "redis", "shop")] {
-        push(app(project, name, "Synced", "Healthy", &format!("{repo} kubernetes/databases/{name}@master"), ns, true, vec![ok("StatefulSet", ns, name), ok("Service", ns, name), ok("PersistentVolumeClaim", ns, &format!("data-{name}-0"))]), 0, false);
+        push(
+            app(
+                project,
+                name,
+                "Synced",
+                "Healthy",
+                &format!("{repo} kubernetes/databases/{name}@master"),
+                ns,
+                true,
+                vec![ok("StatefulSet", ns, name), ok("Service", ns, name), ok("PersistentVolumeClaim", ns, &format!("data-{name}-0"))],
+            ),
+            0,
+            false,
+        );
     }
     list
 }
@@ -674,7 +1022,17 @@ use crate::storage::{ClassInfo, DiskUsage, Location, Measured, StorageInfo, Targ
 const GI: i64 = 1 << 30;
 
 #[allow(clippy::too_many_arguments)]
-fn vol(ns: Option<&str>, claim: Option<&str>, pv: Option<&str>, size: i64, class: &str, kind: &str, driver: &str, detail: &str, location: Location) -> VolumeInfo {
+fn vol(
+    ns: Option<&str>,
+    claim: Option<&str>,
+    pv: Option<&str>,
+    size: i64,
+    class: &str,
+    kind: &str,
+    driver: &str,
+    detail: &str,
+    location: Location,
+) -> VolumeInfo {
     VolumeInfo {
         namespace: ns.map(str::to_string),
         claim: claim.map(str::to_string),
@@ -701,53 +1059,154 @@ pub fn demo_storage() -> StorageInfo {
     use Location::*;
     let mut v = vec![];
 
-    let mut pg = vol(Some("shop"), Some("data-postgres-0"), Some("pvc-3f1c9a2e"), 50, "hcloud-volumes", "csi", "csi.hetzner.cloud", "104829331", External("Hetzner Cloud Volume".into()));
+    let mut pg = vol(
+        Some("shop"),
+        Some("data-postgres-0"),
+        Some("pvc-3f1c9a2e"),
+        50,
+        "hcloud-volumes",
+        "csi",
+        "csi.hetzner.cloud",
+        "104829331",
+        External("Hetzner Cloud Volume".into()),
+    );
     pg.mounted_by = vec![("shop/postgres-0".into(), "worker-fsn1-1".into())];
     pg.usage = Some(DiskUsage { used: 41 * GI, capacity: 49 * GI });
     v.push(pg);
 
-    let mut redis = vol(Some("shop"), Some("redis-data"), Some("pvc-77b0d1c4"), 5, "longhorn", "csi", "driver.longhorn.io", "pvc-77b0d1c4", InCluster("Longhorn".into()));
+    let mut redis = vol(
+        Some("shop"),
+        Some("redis-data"),
+        Some("pvc-77b0d1c4"),
+        5,
+        "longhorn",
+        "csi",
+        "driver.longhorn.io",
+        "pvc-77b0d1c4",
+        InCluster("Longhorn".into()),
+    );
     redis.mounted_by = vec![("shop/redis-master-0".into(), "worker-nbg1-1".into())];
     redis.usage = Some(DiskUsage { used: 4 * GI + 900 * (1 << 20), capacity: 5 * GI });
     v.push(redis);
 
-    let mut prom = vol(Some("monitoring"), Some("prometheus-db"), Some("pv-prometheus"), 100, "", "hostPath", "", "/data/prometheus", InCluster("node disk (hostPath) on homelab-waw-1".into()));
+    let mut prom = vol(
+        Some("monitoring"),
+        Some("prometheus-db"),
+        Some("pv-prometheus"),
+        100,
+        "",
+        "hostPath",
+        "",
+        "/data/prometheus",
+        InCluster("node disk (hostPath) on homelab-waw-1".into()),
+    );
     prom.node = Some("homelab-waw-1".into());
     prom.reclaim = "Retain".into();
     prom.mounted_by = vec![("monitoring/prometheus-0".into(), "homelab-waw-1".into())];
     v.push(prom);
 
-    let mut loki = vol(Some("monitoring"), Some("loki-chunks"), Some("pvc-0be41f7a"), 30, "ebs-gp3", "csi", "ebs.csi.aws.com", "vol-0a3f9b7c21e4d5f60", External("AWS EBS".into()));
+    let mut loki = vol(
+        Some("monitoring"),
+        Some("loki-chunks"),
+        Some("pvc-0be41f7a"),
+        30,
+        "ebs-gp3",
+        "csi",
+        "ebs.csi.aws.com",
+        "vol-0a3f9b7c21e4d5f60",
+        External("AWS EBS".into()),
+    );
     loki.mounted_by = vec![("monitoring/loki-0".into(), "edge-ash-1".into())];
     loki.usage = Some(DiskUsage { used: 12 * GI, capacity: 30 * GI });
     v.push(loki);
 
-    let mut qdrant = vol(Some("search"), Some("qdrant-storage"), Some("pvc-9d2a4e11"), 20, "rook-ceph-block", "csi", "rook-ceph.rbd.csi.ceph.com", "0001-0009-rook-ceph-0000000000000001-9d2a", InCluster("Rook Ceph".into()));
+    let mut qdrant = vol(
+        Some("search"),
+        Some("qdrant-storage"),
+        Some("pvc-9d2a4e11"),
+        20,
+        "rook-ceph-block",
+        "csi",
+        "rook-ceph.rbd.csi.ceph.com",
+        "0001-0009-rook-ceph-0000000000000001-9d2a",
+        InCluster("Rook Ceph".into()),
+    );
     qdrant.mounted_by = vec![("search/qdrant-0".into(), "worker-hel1-1".into())];
     qdrant.usage = Some(DiskUsage { used: 6 * GI, capacity: 20 * GI });
     v.push(qdrant);
 
-    let mut media = vol(Some("catalog"), Some("media"), Some("pv-nas-media"), 200, "", "nfs", "", "192.168.1.20:/volume1/media", External("NFS 192.168.1.20".into()));
+    let mut media = vol(
+        Some("catalog"),
+        Some("media"),
+        Some("pv-nas-media"),
+        200,
+        "",
+        "nfs",
+        "",
+        "192.168.1.20:/volume1/media",
+        External("NFS 192.168.1.20".into()),
+    );
     media.access = vec!["ReadWriteMany".into()];
     media.reclaim = "Retain".into();
-    media.mounted_by = vec![("catalog/catalog-api-5080-0".into(), "homelab-waw-1".into()), ("catalog/catalog-api-5080-1".into(), "homelab-waw-2".into())];
+    media.mounted_by =
+        vec![("catalog/catalog-api-5080-0".into(), "homelab-waw-1".into()), ("catalog/catalog-api-5080-1".into(), "homelab-waw-2".into())];
     media.usage = Some(DiskUsage { used: 140 * GI, capacity: 200 * GI });
     v.push(media);
 
-    let mut cache = vol(Some("ci"), Some("docker-cache"), Some("pvc-5c1e8b90"), 80, "local-path", "hostPath", "rancher.io/local-path", "/opt/local-path-provisioner/pvc-5c1e8b90_ci_docker-cache", InCluster("local-path (node disk) on homelab-waw-2".into()));
+    let mut cache = vol(
+        Some("ci"),
+        Some("docker-cache"),
+        Some("pvc-5c1e8b90"),
+        80,
+        "local-path",
+        "hostPath",
+        "rancher.io/local-path",
+        "/opt/local-path-provisioner/pvc-5c1e8b90_ci_docker-cache",
+        InCluster("local-path (node disk) on homelab-waw-2".into()),
+    );
     cache.node = Some("homelab-waw-2".into());
     cache.mounted_by = vec![("ci/docker-builder-a192-0".into(), "homelab-waw-2".into())];
     v.push(cache);
 
-    let mut pending = vol(Some("shop"), Some("payments-export"), None, 20, "hcloud-volumes", "", "csi.hetzner.cloud", "", External("Hetzner Cloud Volume".into()));
+    let mut pending = vol(
+        Some("shop"),
+        Some("payments-export"),
+        None,
+        20,
+        "hcloud-volumes",
+        "",
+        "csi.hetzner.cloud",
+        "",
+        External("Hetzner Cloud Volume".into()),
+    );
     pending.claim_phase = Some("Pending".into());
     v.push(pending);
 
-    let mut idle = vol(Some("search"), Some("search-api-tmp"), Some("pvc-a14f02c3"), 2, "longhorn", "csi", "driver.longhorn.io", "pvc-a14f02c3", InCluster("Longhorn".into()));
+    let mut idle = vol(
+        Some("search"),
+        Some("search-api-tmp"),
+        Some("pvc-a14f02c3"),
+        2,
+        "longhorn",
+        "csi",
+        "driver.longhorn.io",
+        "pvc-a14f02c3",
+        InCluster("Longhorn".into()),
+    );
     idle.usage = None;
     v.push(idle);
 
-    let mut released = vol(None, None, Some("pv-old-grafana"), 10, "", "hostPath", "", "/data/grafana", InCluster("node disk (hostPath) on worker-fsn1-1".into()));
+    let mut released = vol(
+        None,
+        None,
+        Some("pv-old-grafana"),
+        10,
+        "",
+        "hostPath",
+        "",
+        "/data/grafana",
+        InCluster("node disk (hostPath) on worker-fsn1-1".into()),
+    );
     released.node = Some("worker-fsn1-1".into());
     released.pv_phase = Some("Released".into());
     released.reclaim = "Retain".into();
@@ -770,10 +1229,18 @@ pub fn demo_storage() -> StorageInfo {
         class("rook-ceph-block", "rook-ceph.rbd.csi.ceph.com", false, InCluster("Rook Ceph".into())),
         class("ebs-gp3", "ebs.csi.aws.com", false, External("AWS EBS".into())),
     ];
-    let node_fs = [("homelab-waw-1", 410, 480), ("homelab-waw-2", 120, 480), ("worker-fsn1-1", 31, 160), ("worker-nbg1-1", 22, 160), ("worker-hel1-1", 18, 160), ("cp-fsn1-1", 14, 80), ("edge-ash-1", 9, 80)]
-        .iter()
-        .map(|(n, u, c)| (n.to_string(), DiskUsage { used: u * GI, capacity: c * GI }))
-        .collect();
+    let node_fs = [
+        ("homelab-waw-1", 410, 480),
+        ("homelab-waw-2", 120, 480),
+        ("worker-fsn1-1", 31, 160),
+        ("worker-nbg1-1", 22, 160),
+        ("worker-hel1-1", 18, 160),
+        ("cp-fsn1-1", 14, 80),
+        ("edge-ash-1", 9, 80),
+    ]
+    .iter()
+    .map(|(n, u, c)| (n.to_string(), DiskUsage { used: u * GI, capacity: c * GI }))
+    .collect();
     StorageInfo { volumes: v, classes, node_fs }
 }
 

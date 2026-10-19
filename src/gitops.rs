@@ -185,10 +185,8 @@ pub fn parse(obj: &DynamicObject) -> AppInfo {
 }
 
 pub async fn list(client: &Client, ar: &ApiResource) -> Result<Vec<AppInfo>> {
-    let apps = Api::<DynamicObject>::all_with(client.clone(), ar)
-        .list(&ListParams::default())
-        .await
-        .context("listing Argo CD applications")?;
+    let apps =
+        Api::<DynamicObject>::all_with(client.clone(), ar).list(&ListParams::default()).await.context("listing Argo CD applications")?;
     Ok(apps.items.iter().map(parse).collect())
 }
 

@@ -93,13 +93,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
             for k in 0..12 {
                 let a = k as f64 / 12.0 * TAU;
                 let inner = if k % 3 == 0 { 0.0 } else { big_r * 0.75 };
-                ctx.draw(&CLine::new(
-                    cx + inner * a.cos(),
-                    cy + inner * a.sin(),
-                    cx + big_r * a.cos(),
-                    cy + big_r * a.sin(),
-                    grid,
-                ));
+                ctx.draw(&CLine::new(cx + inner * a.cos(), cy + inner * a.sin(), cx + big_r * a.cos(), cy + big_r * a.sin(), grid));
             }
             ctx.layer();
 

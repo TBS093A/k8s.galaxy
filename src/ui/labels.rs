@@ -18,15 +18,7 @@ impl Placer {
     pub fn new(area: Rect, x_bounds: [f64; 2], y_bounds: [f64; 2]) -> Self {
         let w = area.width.saturating_sub(2).max(1) as i32;
         let h = area.height.saturating_sub(2).max(1) as i32;
-        Self {
-            left: x_bounds[0],
-            right: x_bounds[1],
-            bottom: y_bounds[0],
-            top: y_bounds[1],
-            w,
-            h,
-            taken: vec![false; (w * h) as usize],
-        }
+        Self { left: x_bounds[0], right: x_bounds[1], bottom: y_bounds[0], top: y_bounds[1], w, h, taken: vec![false; (w * h) as usize] }
     }
 
     /// Same mapping ratatui's Canvas uses when it prints labels.
@@ -44,11 +36,7 @@ impl Placer {
     }
 
     fn fits(&self, col: i32, row: i32, len: i32) -> bool {
-        row >= 0
-            && row < self.h
-            && col >= 0
-            && col + len <= self.w
-            && (col..col + len).all(|c| !self.taken[(row * self.w + c) as usize])
+        row >= 0 && row < self.h && col >= 0 && col + len <= self.w && (col..col + len).all(|c| !self.taken[(row * self.w + c) as usize])
     }
 
     fn claim(&mut self, col: i32, row: i32, len: i32) {

@@ -107,7 +107,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     "no control-plane nodes visible"
                 };
-                lines.push(Line::from(vec![st("  infra   ", fx::STEEL), st(p.infra.badge(), hosting_rgb(&p.infra)), st(format!(" — {cp}"), fx::STEEL)]));
+                lines.push(Line::from(vec![
+                    st("  infra   ", fx::STEEL),
+                    st(p.infra.badge(), hosting_rgb(&p.infra)),
+                    st(format!(" — {cp}"), fx::STEEL),
+                ]));
             }
             Some(ProbeState::Err(e)) => lines.push(Line::from(vec![st("  error   ", fx::STEEL), st(e.clone(), fx::RED)])),
             _ => {}

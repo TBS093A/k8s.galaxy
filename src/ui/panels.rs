@@ -122,8 +122,20 @@ pub fn sidebar(f: &mut Frame, area: Rect, app: &App) {
                         None => crate::infra::node_kind(n),
                     }
                 }),
-                load_line("cpu", app.node_usage(&n.name).map(|u| u.cpu_m), app.node_requests(&n.name).cpu_m, n.allocatable.cpu_m, crate::metrics::fmt_cpu),
-                load_line("mem", app.node_usage(&n.name).map(|u| u.mem), app.node_requests(&n.name).mem, n.allocatable.mem, crate::metrics::fmt_mem),
+                load_line(
+                    "cpu",
+                    app.node_usage(&n.name).map(|u| u.cpu_m),
+                    app.node_requests(&n.name).cpu_m,
+                    n.allocatable.cpu_m,
+                    crate::metrics::fmt_cpu,
+                ),
+                load_line(
+                    "mem",
+                    app.node_usage(&n.name).map(|u| u.mem),
+                    app.node_requests(&n.name).mem,
+                    n.allocatable.mem,
+                    crate::metrics::fmt_mem,
+                ),
                 Line::from(vec![
                     styled(format!("{:<9}", "pods"), fx::STEEL),
                     styled(format!("{} ", pods.len()), (200, 220, 230)),
@@ -134,7 +146,14 @@ pub fn sidebar(f: &mut Frame, area: Rect, app: &App) {
             ]
         }
     };
-    f.render_widget(Paragraph::new(detail).block(frame(if app.snap.caps.metrics { "DETAILS" } else { "DETAILS  no metrics-server: requests" }, fx::AMBER, false)), detail_area);
+    f.render_widget(
+        Paragraph::new(detail).block(frame(
+            if app.snap.caps.metrics { "DETAILS" } else { "DETAILS  no metrics-server: requests" },
+            fx::AMBER,
+            false,
+        )),
+        detail_area,
+    );
 
     resources(f, pods_area, app);
 }
@@ -180,7 +199,10 @@ fn resources(f: &mut Frame, area: Rect, app: &App) {
                             spans.push(styled(format!(" r:{}", p.restarts), fx::STEEL));
                         }
                         if let Some(u) = app.pod_usage(p) {
-                            spans.push(styled(format!(" {} {}", crate::metrics::fmt_cpu(u.cpu_m), crate::metrics::fmt_mem(u.mem)), (120, 150, 170)));
+                            spans.push(styled(
+                                format!(" {} {}", crate::metrics::fmt_cpu(u.cpu_m), crate::metrics::fmt_mem(u.mem)),
+                                (120, 150, 170),
+                            ));
                         }
                     }
                     Res::Workload(w) => {
@@ -262,21 +284,24 @@ pub fn ticker(f: &mut Frame, area: Rect, app: &App) {
             })
             .collect()
     };
-    f.render_widget(
-        Paragraph::new(lines).block(frame(&format!("WARNINGS  {}", warnings.len()), fx::AMBER, false)),
-        area,
-    );
+    f.render_widget(Paragraph::new(lines).block(frame(&format!("WARNINGS  {}", warnings.len()), fx::AMBER, false)), area);
 }
 
 pub fn footer(f: &mut Frame, area: Rect, app: &App) {
     let key = |k: &str, d: &str| {
-        vec![
-            Span::styled(format!(" {k} "), Style::new().fg(fx::c(fx::BG)).bg(fx::c(fx::STEEL))),
-            styled(format!(" {d}  "), fx::STEEL),
-        ]
+        vec![Span::styled(format!(" {k} "), Style::new().fg(fx::c(fx::BG)).bg(fx::c(fx::STEEL))), styled(format!(" {d}  "), fx::STEEL)]
     };
     let keys: &[(&str, &str)] = if app.view.is_ops() {
-        &[("1-8/Tab", "view"), ("j/k", "select"), ("t", "tab"), ("⏎", "details"), ("Esc", "map"), ("c", "clusters"), ("r", "refresh"), ("q", "quit")]
+        &[
+            ("1-8/Tab", "view"),
+            ("j/k", "select"),
+            ("t", "tab"),
+            ("⏎", "details"),
+            ("Esc", "map"),
+            ("c", "clusters"),
+            ("r", "refresh"),
+            ("q", "quit"),
+        ]
     } else {
         &[
             ("1-8/Tab", "view"),
@@ -331,27 +356,14 @@ pub fn logs(f: &mut Frame, area: Rect, app: &App) {
     };
     let prefix = if logs.is_log { "LOGS " } else { "" };
     let title = format!("{prefix}{}  [{}/{}]  j/k PgUp/PgDn g/G  Esc close", logs.title, logs.scroll + 1, logs.lines.len());
-    f.render_widget(
-        Paragraph::new(lines)
-            .style(Style::new().bg(fx::c(fx::BG)))
-            .block(frame(&title, fx::GREEN, true)),
-        popup,
-    );
+    f.render_widget(Paragraph::new(lines).style(Style::new().bg(fx::c(fx::BG))).block(frame(&title, fx::GREEN, true)), popup);
 }
 
 fn centered(area: Rect, pct_x: u16, pct_y: u16) -> Rect {
-    let [_, v, _] = Layout::vertical([
-        Constraint::Percentage((100 - pct_y) / 2),
-        Constraint::Percentage(pct_y),
-        Constraint::Fill(1),
-    ])
-    .areas(area);
-    let [_, h, _] = Layout::horizontal([
-        Constraint::Percentage((100 - pct_x) / 2),
-        Constraint::Percentage(pct_x),
-        Constraint::Fill(1),
-    ])
-    .areas(v);
+    let [_, v, _] =
+        Layout::vertical([Constraint::Percentage((100 - pct_y) / 2), Constraint::Percentage(pct_y), Constraint::Fill(1)]).areas(area);
+    let [_, h, _] =
+        Layout::horizontal([Constraint::Percentage((100 - pct_x) / 2), Constraint::Percentage(pct_x), Constraint::Fill(1)]).areas(v);
     h
 }
 

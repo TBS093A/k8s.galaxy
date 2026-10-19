@@ -161,7 +161,10 @@ impl VolumeInfo {
             && m.fs_size > 0
             && m.fs_used as f64 / m.fs_size as f64 > 0.85
         {
-            p.push((Health::Warn, format!("filesystem {} on the node is {:.0}% full", m.device, m.fs_used as f64 * 100.0 / m.fs_size as f64)));
+            p.push((
+                Health::Warn,
+                format!("filesystem {} on the node is {:.0}% full", m.device, m.fs_used as f64 * 100.0 / m.fs_size as f64),
+            ));
         }
         if self.claim.is_some() && self.mounted_by.is_empty() && self.claim_phase.as_deref() == Some("Bound") {
             p.push((Health::Ok, "not mounted by any pod".into()));
@@ -280,13 +283,7 @@ fn hostname_affinity(pv: &PersistentVolume) -> Option<String> {
 /// Backend kind, driver and detail of a PV.
 fn backend(pv: &PersistentVolume) -> (String, String, String) {
     let Some(s) = pv.spec.as_ref() else { return ("?".into(), String::new(), String::new()) };
-    let provisioner = pv
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get("pv.kubernetes.io/provisioned-by"))
-        .cloned()
-        .unwrap_or_default();
+    let provisioner = pv.metadata.annotations.as_ref().and_then(|a| a.get("pv.kubernetes.io/provisioned-by")).cloned().unwrap_or_default();
     if let Some(h) = &s.host_path {
         return ("hostPath".into(), provisioner, h.path.clone());
     }
@@ -384,7 +381,10 @@ pub async fn fetch(client: &Client) -> Result<StorageInfo> {
         let node = p.spec.as_ref().and_then(|s| s.node_name.clone()).unwrap_or_default();
         for v in p.spec.as_ref().and_then(|s| s.volumes.clone()).unwrap_or_default() {
             if let Some(c) = v.persistent_volume_claim {
-                mounts.entry((ns.clone(), c.claim_name)).or_default().push((format!("{ns}/{}", p.metadata.name.clone().unwrap_or_default()), node.clone()));
+                mounts
+                    .entry((ns.clone(), c.claim_name))
+                    .or_default()
+                    .push((format!("{ns}/{}", p.metadata.name.clone().unwrap_or_default()), node.clone()));
             }
         }
     }
@@ -395,7 +395,11 @@ pub async fn fetch(client: &Client) -> Result<StorageInfo> {
         let ns = c.metadata.namespace.clone().unwrap_or_default();
         let name = c.metadata.name.clone().unwrap_or_default();
         let spec = c.spec.clone().unwrap_or_default();
-        let pv = spec.volume_name.clone().filter(|v| !v.is_empty()).and_then(|v| pvs.items.iter().find(|p| p.metadata.name.as_deref() == Some(&v)));
+        let pv = spec
+            .volume_name
+            .clone()
+            .filter(|v| !v.is_empty())
+            .and_then(|v| pvs.items.iter().find(|p| p.metadata.name.as_deref() == Some(&v)));
         if let Some(pv) = pv {
             claimed_pvs.insert(pv.metadata.name.clone().unwrap_or_default());
         }
@@ -476,7 +480,8 @@ fn volume(pv: Option<&PersistentVolume>, node_ips: &BTreeSet<String>) -> VolumeI
     v.class = spec.storage_class_name.clone().unwrap_or_default();
     v.access = spec.access_modes.clone().unwrap_or_default();
     if v.pv_phase.as_deref() == Some("Released") {
-        v.released_from = spec.claim_ref.as_ref().map(|c| format!("{}/{}", c.namespace.clone().unwrap_or_default(), c.name.clone().unwrap_or_default()));
+        v.released_from =
+            spec.claim_ref.as_ref().map(|c| format!("{}/{}", c.namespace.clone().unwrap_or_default(), c.name.clone().unwrap_or_default()));
     }
     v.kind = kind;
     v.driver = driver;
@@ -515,7 +520,12 @@ pub async fn measure(client: &Client, targets: &[Target], dry_run: bool) -> Resu
                 Ok(found) => list
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| (t.pv.clone(), found.get(&i).cloned().ok_or_else(|| "no output for this directory (missing on the node?)".to_string())))
+                    .map(|(i, t)| {
+                        (
+                            t.pv.clone(),
+                            found.get(&i).cloned().ok_or_else(|| "no output for this directory (missing on the node?)".to_string()),
+                        )
+                    })
                     .collect::<Vec<_>>(),
                 Err(e) => list.iter().map(|t| (t.pv.clone(), Err(format!("{e:#}")))).collect(),
             }
@@ -526,8 +536,10 @@ pub async fn measure(client: &Client, targets: &[Target], dry_run: bool) -> Resu
 }
 
 async fn measure_node(api: &Api<Pod>, node: &str, list: &[&Target], dry_run: bool) -> Result<BTreeMap<usize, Measured>> {
-    let mounts: Vec<_> = (0..list.len()).map(|i| json!({"name": format!("v{i}"), "mountPath": format!("/v/{i}"), "readOnly": true})).collect();
-    let volumes: Vec<_> = list.iter().enumerate().map(|(i, t)| json!({"name": format!("v{i}"), "hostPath": {"path": t.path, "type": "Directory"}})).collect();
+    let mounts: Vec<_> =
+        (0..list.len()).map(|i| json!({"name": format!("v{i}"), "mountPath": format!("/v/{i}"), "readOnly": true})).collect();
+    let volumes: Vec<_> =
+        list.iter().enumerate().map(|(i, t)| json!({"name": format!("v{i}"), "hostPath": {"path": t.path, "type": "Directory"}})).collect();
     // One line per directory: index, used KiB, then df's device, size and used KiB.
     let script = (0..list.len())
         .map(|i| format!("echo \"{i} $(du -sk /v/{i} 2>/dev/null | cut -f1) $(df -kP /v/{i} | tail -1 | awk '{{print $1, $2, $3}}')\""))

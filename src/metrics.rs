@@ -97,7 +97,10 @@ pub async fn fetch(client: &Client, nodes: &ApiResource, pods: &ApiResource) -> 
     for pod in p.items {
         let mut total = Usage::default();
         for c in pod.data["containers"].as_array().into_iter().flatten() {
-            total += Usage { cpu_m: cpu_milli(c["usage"]["cpu"].as_str().unwrap_or("0")), mem: bytes(c["usage"]["memory"].as_str().unwrap_or("0")) };
+            total += Usage {
+                cpu_m: cpu_milli(c["usage"]["cpu"].as_str().unwrap_or("0")),
+                mem: bytes(c["usage"]["memory"].as_str().unwrap_or("0")),
+            };
         }
         m.pods.insert((pod.metadata.namespace.unwrap_or_default(), pod.metadata.name.unwrap_or_default()), total);
     }

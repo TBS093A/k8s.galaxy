@@ -135,7 +135,6 @@ impl RolloutInfo {
         self.phase.health()
     }
 
-
     pub fn actions(&self) -> Vec<ActionKind> {
         use ActionKind::*;
         match self.kind {
@@ -195,7 +194,9 @@ impl ActionKind {
             ActionKind::Pause => "stops the rollout where it is".into(),
             ActionKind::Resume => "continues a paused rollout".into(),
             ActionKind::Undo => match r.undo_target(to) {
-                Some(prev) => format!("rolls back to revision {} ({})", prev.revision, prev.image.rsplit('/').next().unwrap_or(&prev.image)),
+                Some(prev) => {
+                    format!("rolls back to revision {} ({})", prev.revision, prev.image.rsplit('/').next().unwrap_or(&prev.image))
+                }
                 None => "rolls back to the previous revision".into(),
             },
             ActionKind::Promote => "skips the current pause / advances to the next step".into(),
@@ -478,9 +479,7 @@ pub struct RbacInfo {
 
 impl RbacInfo {
     pub fn role_of(&self, b: &BindingInfo) -> Option<&RoleInfo> {
-        self.roles.iter().find(|r| {
-            r.name == b.role && r.cluster == b.role_cluster && (r.cluster || r.namespace == b.namespace)
-        })
+        self.roles.iter().find(|r| r.name == b.role && r.cluster == b.role_cluster && (r.cluster || r.namespace == b.namespace))
     }
 
     /// Every subject with its bindings.
@@ -519,7 +518,10 @@ impl RbacInfo {
             let Some(role) = self.role_of(b) else { continue };
             if role.rules.iter().any(|r| r.allows(verb, resource, group)) {
                 for s in &b.subjects {
-                    out.push((s.clone(), format!("{} → {}{} ({})", b.name, if b.role_cluster { "ClusterRole/" } else { "Role/" }, b.role, b.scope())));
+                    out.push((
+                        s.clone(),
+                        format!("{} → {}{} ({})", b.name, if b.role_cluster { "ClusterRole/" } else { "Role/" }, b.role, b.scope()),
+                    ));
                 }
             }
         }
@@ -1052,7 +1054,9 @@ pub async fn net(client: &Client, crds: &Crds) -> Result<NetInfo> {
         }
     }
     let endpoints = |ns: &str, svc: &str| -> Option<(usize, usize)> {
-        services.contains(&(ns.to_string(), svc.to_string())).then(|| eps.get(&(ns.to_string(), svc.to_string())).copied().unwrap_or((0, 0)))
+        services
+            .contains(&(ns.to_string(), svc.to_string()))
+            .then(|| eps.get(&(ns.to_string(), svc.to_string())).copied().unwrap_or((0, 0)))
     };
 
     let mut info = NetInfo {
@@ -1114,12 +1118,7 @@ pub async fn net(client: &Client, crds: &Crds) -> Result<NetInfo> {
                 .unwrap_or_else(|| "<default>".into()),
             hosts,
             backends,
-            tls: spec
-                .tls
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|t| Some((t.secret_name?, t.hosts.unwrap_or_default())))
-                .collect(),
+            tls: spec.tls.unwrap_or_default().into_iter().filter_map(|t| Some((t.secret_name?, t.hosts.unwrap_or_default()))).collect(),
             address,
             problems: vec![],
         });
@@ -1217,7 +1216,11 @@ pub async fn net(client: &Client, crds: &Crds) -> Result<NetInfo> {
                 kind,
                 namespace: ns,
                 name: r.metadata.name.clone().unwrap_or_default(),
-                class: parents.iter().map(|(n, g, sec)| if sec.is_empty() { format!("{n}/{g}") } else { format!("{n}/{g}:{sec}") }).collect::<Vec<_>>().join(","),
+                class: parents
+                    .iter()
+                    .map(|(n, g, sec)| if sec.is_empty() { format!("{n}/{g}") } else { format!("{n}/{g}:{sec}") })
+                    .collect::<Vec<_>>()
+                    .join(","),
                 hosts,
                 backends,
                 tls,
@@ -1359,11 +1362,8 @@ pub async fn rbac(client: &Client) -> Result<RbacInfo> {
             namespace: ns,
         });
     }
-    info.service_accounts = sas
-        .items
-        .into_iter()
-        .map(|s| (s.metadata.namespace.unwrap_or_default(), s.metadata.name.unwrap_or_default()))
-        .collect();
+    info.service_accounts =
+        sas.items.into_iter().map(|s| (s.metadata.namespace.unwrap_or_default(), s.metadata.name.unwrap_or_default())).collect();
     Ok(info)
 }
 
@@ -1401,7 +1401,16 @@ pub async fn perform(client: &Client, crds: &Crds, a: &Action, dry_run: bool) ->
                 Retry => status(json!({"status": {"abort": false}})).await?,
                 Undo => {
                     let ro = api.get(&a.name).await?;
-                    let tpl = previous_template(client, ns, ro.metadata.uid.as_deref(), &ro.metadata.annotations, "rollout.argoproj.io/revision", "rollouts-pod-template-hash", a.to_revision).await?;
+                    let tpl = previous_template(
+                        client,
+                        ns,
+                        ro.metadata.uid.as_deref(),
+                        &ro.metadata.annotations,
+                        "rollout.argoproj.io/revision",
+                        "rollouts-pod-template-hash",
+                        a.to_revision,
+                    )
+                    .await?;
                     api.patch(&a.name, &pp, &Patch::Json::<()>(json_patch_template(tpl)?)).await?;
                 }
             }
@@ -1414,7 +1423,16 @@ pub async fn perform(client: &Client, crds: &Crds, a: &Action, dry_run: bool) ->
                 Resume => drop(api.patch(&a.name, &pp, &Patch::Merge(json!({"spec": {"paused": false}}))).await?),
                 Undo => {
                     let d = api.get(&a.name).await?;
-                    let tpl = previous_template(client, ns, d.metadata.uid.as_deref(), &d.metadata.annotations, "deployment.kubernetes.io/revision", "pod-template-hash", a.to_revision).await?;
+                    let tpl = previous_template(
+                        client,
+                        ns,
+                        d.metadata.uid.as_deref(),
+                        &d.metadata.annotations,
+                        "deployment.kubernetes.io/revision",
+                        "pod-template-hash",
+                        a.to_revision,
+                    )
+                    .await?;
                     api.patch(&a.name, &pp, &Patch::Json::<()>(json_patch_template(tpl)?)).await?;
                 }
                 k => bail!("{} is not supported for Deployments", k.label()),
@@ -1446,14 +1464,7 @@ pub async fn perform(client: &Client, crds: &Crds, a: &Action, dry_run: bool) ->
             }
         }
     }
-    Ok(format!(
-        "{}{} {} {}/{}",
-        if dry_run { "dry-run OK: " } else { "" },
-        a.kind.label(),
-        a.target.as_str(),
-        a.namespace,
-        a.name
-    ))
+    Ok(format!("{}{} {} {}/{}", if dry_run { "dry-run OK: " } else { "" }, a.kind.label(), a.target.as_str(), a.namespace, a.name))
 }
 
 async fn merge(api: &Api<DynamicObject>, name: &str, pp: &PatchParams, p: Value, status: bool) -> Result<()> {
@@ -1548,10 +1559,16 @@ pub fn action_warnings(r: &RolloutInfo, kind: ActionKind, to: Option<i64>, apps:
                         w.push((Health::Ok, format!("r{} → r{}, skipping {skipped} newer revision(s)", r.revision, prev.revision)));
                     }
                     if prev.revision > r.revision {
-                        w.push((Health::Warn, format!("r{} is newer than the current r{} — this rolls forward, not back", prev.revision, r.revision)));
+                        w.push((
+                            Health::Warn,
+                            format!("r{} is newer than the current r{} — this rolls forward, not back", prev.revision, r.revision),
+                        ));
                     }
                     if prev.image == r.image {
-                        w.push((Health::Warn, format!("r{} runs the same image ({}) — only other pod-template fields change", prev.revision, prev.image)));
+                        w.push((
+                            Health::Warn,
+                            format!("r{} runs the same image ({}) — only other pod-template fields change", prev.revision, prev.image),
+                        ));
                     }
                 }
             }
@@ -1570,13 +1587,18 @@ pub fn action_warnings(r: &RolloutInfo, kind: ActionKind, to: Option<i64>, apps:
             if r.kind == RolloutKind::Argo && !r.steps.is_empty() && r.rollback_window.is_none() {
                 w.push((
                     Health::Warn,
-                    format!("no spec.rollbackWindow: the rollback runs all {} canary steps again (F promote-full skips them)", r.steps.len()),
+                    format!(
+                        "no spec.rollbackWindow: the rollback runs all {} canary steps again (F promote-full skips them)",
+                        r.steps.len()
+                    ),
                 ));
             }
         }
         ActionKind::Pause if app.is_some() => w.push((Health::Ok, "Argo CD will report the app as Suspended while paused".into())),
         ActionKind::PromoteFull => w.push((Health::Warn, "skips the remaining steps and analysis — no automatic safety net".into())),
-        ActionKind::Abort => w.push((Health::Ok, "traffic goes back to stable; the rollout stays Degraded until retry (Y) or a new revision".into())),
+        ActionKind::Abort => {
+            w.push((Health::Ok, "traffic goes back to stable; the rollout stays Degraded until retry (Y) or a new revision".into()))
+        }
         _ => {}
     }
     w
@@ -1594,9 +1616,10 @@ pub fn caveats(r: &RolloutInfo, apps: &[crate::gitops::AppInfo]) -> Vec<(Health,
         None => {}
     }
     match r.kind {
-        RolloutKind::StatefulSet | RolloutKind::DaemonSet => {
-            c.push((Health::Warn, format!("no rollback for {}s here (history is in ControllerRevisions) — change the image in Git", r.kind.as_str())))
-        }
+        RolloutKind::StatefulSet | RolloutKind::DaemonSet => c.push((
+            Health::Warn,
+            format!("no rollback for {}s here (history is in ControllerRevisions) — change the image in Git", r.kind.as_str()),
+        )),
         RolloutKind::Argo if !r.steps.is_empty() && r.rollback_window.is_none() => {
             c.push((Health::Ok, "no spec.rollbackWindow: a rollback re-runs the canary steps".into()))
         }
@@ -1630,7 +1653,15 @@ mod tests {
 
     #[test]
     fn undo_warnings() {
-        let rev = |n: i64, image: &str| Revision { revision: n, name: format!("h{n}"), image: image.into(), replicas: 0, ready: 0, age: "1d".into(), role: None };
+        let rev = |n: i64, image: &str| Revision {
+            revision: n,
+            name: format!("h{n}"),
+            image: image.into(),
+            replicas: 0,
+            ready: 0,
+            age: "1d".into(),
+            role: None,
+        };
         let r = RolloutInfo {
             kind: RolloutKind::Deployment,
             namespace: "shop".into(),

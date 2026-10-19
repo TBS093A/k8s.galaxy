@@ -262,8 +262,7 @@ pub fn parse_hetzner(body: &Value) -> Vec<CloudInstance> {
 // ---------------------------------------------------------------- AWS
 
 async fn aws(regions: &[String]) -> Result<Vec<CloudInstance>> {
-    let regions: Vec<Option<&str>> =
-        if regions.is_empty() { vec![None] } else { regions.iter().map(|r| Some(r.as_str())).collect() };
+    let regions: Vec<Option<&str>> = if regions.is_empty() { vec![None] } else { regions.iter().map(|r| Some(r.as_str())).collect() };
     let mut out = vec![];
     for region in regions {
         let mut args = vec!["ec2", "describe-instances", "--output", "json"];
@@ -282,17 +281,9 @@ pub fn parse_aws(body: &Value) -> Vec<CloudInstance> {
         .map(|i| {
             let zone = str_at(i, &["Placement", "AvailabilityZone"]);
             let mut names = vec![];
-            names.extend(
-                arr(i, "Tags")
-                    .iter()
-                    .find(|t| t["Key"] == "Name")
-                    .and_then(|t| t["Value"].as_str().map(str::to_string)),
-            );
+            names.extend(arr(i, "Tags").iter().find(|t| t["Key"] == "Name").and_then(|t| t["Value"].as_str().map(str::to_string)));
             names.extend(i["PrivateDnsName"].as_str().filter(|s| !s.is_empty()).map(str::to_string));
-            let ips = ["PrivateIpAddress", "PublicIpAddress"]
-                .iter()
-                .filter_map(|k| i[*k].as_str().map(str::to_string))
-                .collect();
+            let ips = ["PrivateIpAddress", "PublicIpAddress"].iter().filter_map(|k| i[*k].as_str().map(str::to_string)).collect();
             CloudInstance {
                 provider: Some(Provider::Aws),
                 id: str_at(i, &["InstanceId"]),
@@ -404,13 +395,10 @@ pub fn parse_azure_vmss(body: &Value) -> Vec<CloudInstance> {
 // ---------------------------------------------------------------- helpers
 
 async fn cli_json(cmd: &str, args: &[&str]) -> Result<Value> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(45),
-        Command::new(cmd).args(args).kill_on_drop(true).output(),
-    )
-    .await
-    .with_context(|| format!("{cmd} timed out"))?
-    .with_context(|| format!("running `{cmd}` (is it installed?)"))?;
+    let output = tokio::time::timeout(Duration::from_secs(45), Command::new(cmd).args(args).kill_on_drop(true).output())
+        .await
+        .with_context(|| format!("{cmd} timed out"))?
+        .with_context(|| format!("running `{cmd}` (is it installed?)"))?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         bail!("{cmd}: {}", err.lines().find(|l| !l.trim().is_empty()).unwrap_or("failed"));

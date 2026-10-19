@@ -9,11 +9,11 @@ use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, ListState, Para
 
 use super::health_rgb;
 use crate::app::{App, NetTab, OpsRef, RbacTab, StoreTab, View};
-use crate::metrics::fmt_mem;
-use crate::storage::{Location, VolumeInfo};
 use crate::fx::{self, Rgb};
+use crate::metrics::fmt_mem;
 use crate::model::Health;
 use crate::ops::{BindingInfo, NetInfo, Phase, RbacInfo, RolloutInfo, Rule, Subject};
+use crate::storage::{Location, VolumeInfo};
 
 const TEXT: Rgb = (200, 220, 230);
 
@@ -137,16 +137,34 @@ fn list(f: &mut Frame, area: Rect, app: &App) {
     title.push(Span::raw(" "));
     let hints = match app.view {
         View::Rollouts => {
-            let mode = if app.read_only { "  READ-ONLY" } else if app.dry_run { "  DRY-RUN" } else { "" };
+            let mode = if app.read_only {
+                "  READ-ONLY"
+            } else if app.dry_run {
+                "  DRY-RUN"
+            } else {
+                ""
+            };
             format!(" j/k select · R restart · p pause/resume · u undo · P promote · F full · A abort · Y retry{mode} ")
         }
         View::Network => " j/k select · t tab · ⏎ full details ".into(),
         View::Storage => {
-            let mode = if app.read_only { "  READ-ONLY" } else if app.dry_run { "  DRY-RUN" } else { "" };
+            let mode = if app.read_only {
+                "  READ-ONLY"
+            } else if app.dry_run {
+                "  DRY-RUN"
+            } else {
+                ""
+            };
             format!(" j/k select · t tab · m measure hostPath/local (du on nodes) · ⏎ details{mode} ")
         }
         View::Argo => {
-            let mode = if app.read_only { "  READ-ONLY" } else if app.dry_run { "  DRY-RUN" } else { "" };
+            let mode = if app.read_only {
+                "  READ-ONLY"
+            } else if app.dry_run {
+                "  DRY-RUN"
+            } else {
+                ""
+            };
             format!(" j/k select · s sync · S sync+prune · R refresh · H hard refresh · ⏎ details{mode} ")
         }
         _ => format!(" j/k · t tab · / who-can · s system:* {} · ⏎ details ", if app.show_system { "on" } else { "off" }),
@@ -192,8 +210,12 @@ fn empty_hint(app: &App) -> Vec<Line<'static>> {
         View::Argo if !caps.argocd => "Argo CD (applications.argoproj.io) is not installed in this cluster.".into(),
         View::Argo => "no Argo CD Applications".into(),
         View::Network => match app.net_tab {
-            NetTab::Gateways if !caps.gateway_api => "Gateway API CRDs (gateway.networking.k8s.io) are not installed in this cluster.".into(),
-            NetTab::Certs | NetTab::Issuers if !caps.cert_manager => "cert-manager CRDs (cert-manager.io) are not installed in this cluster.".into(),
+            NetTab::Gateways if !caps.gateway_api => {
+                "Gateway API CRDs (gateway.networking.k8s.io) are not installed in this cluster.".into()
+            }
+            NetTab::Certs | NetTab::Issuers if !caps.cert_manager => {
+                "cert-manager CRDs (cert-manager.io) are not installed in this cluster.".into()
+            }
             _ => "nothing here".into(),
         },
         _ => "no RBAC data (needs list on roles/bindings) — press s to include system:* objects".into(),
@@ -207,7 +229,9 @@ fn summary(app: &App) -> Vec<Span<'static>> {
             let r = &app.snap.rollouts;
             let count = |p: Phase| r.iter().filter(|x| x.phase == p).count();
             let mut v = vec![st(format!("  {} ", r.len()), fx::STEEL)];
-            for (p, rgb) in [(Phase::Progressing, fx::CYAN), (Phase::Paused, fx::AMBER), (Phase::Degraded, fx::RED), (Phase::Aborted, fx::RED)] {
+            for (p, rgb) in
+                [(Phase::Progressing, fx::CYAN), (Phase::Paused, fx::AMBER), (Phase::Degraded, fx::RED), (Phase::Aborted, fx::RED)]
+            {
                 let n = count(p);
                 if n > 0 {
                     v.push(st(format!(" {n} {}", p.as_str().to_lowercase()), rgb));
@@ -238,7 +262,8 @@ fn summary(app: &App) -> Vec<Span<'static>> {
         View::Storage => {
             let s = &app.snap.storage;
             let total: i64 = s.volumes.iter().filter(|v| v.pv.is_some()).filter_map(|v| v.size()).sum();
-            let inside: i64 = s.volumes.iter().filter(|v| v.pv.is_some() && matches!(v.location, Location::InCluster(_))).filter_map(|v| v.size()).sum();
+            let inside: i64 =
+                s.volumes.iter().filter(|v| v.pv.is_some() && matches!(v.location, Location::InCluster(_))).filter_map(|v| v.size()).sum();
             let used: i64 = s.volumes.iter().filter_map(|v| used_of(app, v).map(|u| u.0)).sum();
             let known = s.volumes.iter().filter(|v| used_of(app, v).is_some()).count();
             vec![
@@ -323,10 +348,22 @@ fn row(app: &App, o: &OpsRef, t: f64) -> Line<'static> {
             });
             let missing = r.backends.iter().any(|b| b.endpoints.is_none());
             s.push(st(format!(" → {}", r.backends.len()), fx::STEEL));
-            s.push(st(if missing { " svc missing".into() } else { format!(" ep {ready}/{total}") }, if missing || ready == 0 { fx::RED } else if ready < total { fx::AMBER } else { fx::GREEN }));
+            s.push(st(
+                if missing { " svc missing".into() } else { format!(" ep {ready}/{total}") },
+                if missing || ready == 0 {
+                    fx::RED
+                } else if ready < total {
+                    fx::AMBER
+                } else {
+                    fx::GREEN
+                },
+            ));
             for (secret, _) in r.tls.iter().take(1) {
                 match net.cert_for(&r.namespace, secret) {
-                    Some(c) if c.ready => s.push(st(format!("  tls {}", c.days_left.map(|d| format!("{d}d")).unwrap_or_else(|| "ok".into())), health_rgb(c.health()))),
+                    Some(c) if c.ready => s.push(st(
+                        format!("  tls {}", c.days_left.map(|d| format!("{d}d")).unwrap_or_else(|| "ok".into())),
+                        health_rgb(c.health()),
+                    )),
                     Some(_) => s.push(st("  tls NOT READY", fx::RED)),
                     None if net.tls_secrets.contains(&(r.namespace.clone(), secret.clone())) => s.push(st("  tls (unmanaged)", fx::STEEL)),
                     None => s.push(st("  tls secret missing", fx::RED)),
@@ -366,7 +403,11 @@ fn row(app: &App, o: &OpsRef, t: f64) -> Line<'static> {
         ]),
         OpsRef::Subject(s, bindings) => {
             let rbac = &app.snap.rbac;
-            let mut v = vec![dot, st(pad(&s.name, 36), TEXT), st(format!("{:>2} binding{} ", bindings.len(), if bindings.len() == 1 { " " } else { "s" }), fx::STEEL)];
+            let mut v = vec![
+                dot,
+                st(pad(&s.name, 36), TEXT),
+                st(format!("{:>2} binding{} ", bindings.len(), if bindings.len() == 1 { " " } else { "s" }), fx::STEEL),
+            ];
             let cluster_admin = bindings.iter().any(|b| b.cluster && b.role == "cluster-admin");
             if cluster_admin {
                 v.push(st(" cluster-admin", fx::RED));
@@ -402,11 +443,22 @@ fn row(app: &App, o: &OpsRef, t: f64) -> Line<'static> {
         }
         OpsRef::Volume(v) => {
             let measured = app.measurement(v);
-            let mut s = vec![dot, st(format!("{:<11}", v.location.short()), location_rgb(&v.location)), st(pad(&v.name(), 30), TEXT), Span::raw(" ")];
+            let mut s = vec![
+                dot,
+                st(format!("{:<11}", v.location.short()), location_rgb(&v.location)),
+                st(pad(&v.name(), 30), TEXT),
+                Span::raw(" "),
+            ];
             match used_of(app, v) {
                 Some((used, size, _)) if size > 0 => {
                     let frac = used as f64 / size as f64;
-                    let rgb = if frac >= 0.95 { fx::RED } else if frac >= 0.85 { fx::AMBER } else { fx::GREEN };
+                    let rgb = if frac >= 0.95 {
+                        fx::RED
+                    } else if frac >= 0.85 {
+                        fx::AMBER
+                    } else {
+                        fx::GREEN
+                    };
                     s.extend(bar((used.min(size) >> 20) as i32, (size >> 20) as i32, 8, rgb, t, false));
                     s.push(st(format!(" {:>7}/{:<7} ", fmt_mem(used), fmt_mem(size)), rgb));
                 }
@@ -527,7 +579,11 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
                 l.push(Line::raw(""));
                 l.push(section("TLS"));
                 for (secret, hosts) in &r.tls {
-                    l.push(Line::from(vec![st("  secret ", fx::STEEL), bold(secret.clone(), TEXT), st(format!("  {}", hosts.join(",")), fx::STEEL)]));
+                    l.push(Line::from(vec![
+                        st("  secret ", fx::STEEL),
+                        bold(secret.clone(), TEXT),
+                        st(format!("  {}", hosts.join(",")), fx::STEEL),
+                    ]));
                     l.extend(cert_chain(net, &r.namespace, secret));
                 }
             }
@@ -544,7 +600,11 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
                 Line::from(vec![bold("Gateway ", fx::CYAN), bold(format!("{}/{}", g.namespace, g.name), TEXT)]),
                 kv("class", g.class.clone()),
                 kv("addresses", g.addresses.join(", ")),
-                Line::from(vec![st(format!("{:<10}", "status"), fx::STEEL), st(if g.programmed { "Programmed" } else { "NOT programmed" }, if g.programmed { fx::GREEN } else { fx::RED }), st(format!("  {}", g.message), fx::STEEL)]),
+                Line::from(vec![
+                    st(format!("{:<10}", "status"), fx::STEEL),
+                    st(if g.programmed { "Programmed" } else { "NOT programmed" }, if g.programmed { fx::GREEN } else { fx::RED }),
+                    st(format!("  {}", g.message), fx::STEEL),
+                ]),
                 Line::raw(""),
                 section("listeners"),
             ];
@@ -567,7 +627,11 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
             l.push(section("attached routes"));
             let key = format!("{}/{}", g.namespace, g.name);
             for r in net.routes.iter().filter(|r| r.class.split(',').any(|p| p == key || p.starts_with(&format!("{key}:")))) {
-                l.push(Line::from(vec![st("  • ", health_rgb(net.route_health(r))), st(format!("{}/{}  ", r.namespace, r.name), TEXT), st(r.hosts.join(","), fx::CYAN)]));
+                l.push(Line::from(vec![
+                    st("  • ", health_rgb(net.route_health(r))),
+                    st(format!("{}/{}  ", r.namespace, r.name), TEXT),
+                    st(r.hosts.join(","), fx::CYAN),
+                ]));
             }
             l
         }
@@ -582,7 +646,10 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
             l.extend(issuer_line(net, &c.namespace, &c.issuer));
             l.push(Line::from(vec![
                 st(format!("{:<10}", "status"), fx::STEEL),
-                st(if c.ready { "Ready".to_string() } else { format!("NOT READY ({})", c.reason) }, if c.ready { fx::GREEN } else { fx::RED }),
+                st(
+                    if c.ready { "Ready".to_string() } else { format!("NOT READY ({})", c.reason) },
+                    if c.ready { fx::GREEN } else { fx::RED },
+                ),
             ]));
             if !c.message.is_empty() {
                 l.push(Line::from(st(format!("          {}", c.message), fx::STEEL)));
@@ -608,15 +675,26 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
             let users: Vec<_> = net
                 .routes
                 .iter()
-                .filter(|r| r.tls.iter().any(|(s, _)| *s == c.secret) && (r.namespace == c.namespace || net.cert_for(&r.namespace, &c.secret).is_some()))
+                .filter(|r| {
+                    r.tls.iter().any(|(s, _)| *s == c.secret)
+                        && (r.namespace == c.namespace || net.cert_for(&r.namespace, &c.secret).is_some())
+                })
                 .collect();
             if users.is_empty() {
                 l.push(Line::from(st("  no Ingress / route references this secret", fx::STEEL)));
             }
             for r in users {
-                l.push(Line::from(vec![st("  • ", health_rgb(net.route_health(r))), st(format!("{} {}/{}  ", r.kind.short(), r.namespace, r.name), TEXT), st(r.hosts.join(","), fx::CYAN)]));
+                l.push(Line::from(vec![
+                    st("  • ", health_rgb(net.route_health(r))),
+                    st(format!("{} {}/{}  ", r.kind.short(), r.namespace, r.name), TEXT),
+                    st(r.hosts.join(","), fx::CYAN),
+                ]));
             }
-            for g in net.gateways.iter().filter(|g| g.namespace == c.namespace && g.listeners.iter().any(|l| l.tls_secret.as_deref() == Some(&c.secret))) {
+            for g in net
+                .gateways
+                .iter()
+                .filter(|g| g.namespace == c.namespace && g.listeners.iter().any(|l| l.tls_secret.as_deref() == Some(&c.secret)))
+            {
                 l.push(Line::from(vec![st("  • ", fx::GREEN), st(format!("gateway {}/{}", g.namespace, g.name), TEXT)]));
             }
             l
@@ -625,16 +703,27 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
             let net = &app.snap.net;
             let key = format!("{}/{}", if i.cluster { "ClusterIssuer" } else { "Issuer" }, i.name);
             let mut l = vec![
-                Line::from(vec![bold(format!("{} ", if i.cluster { "ClusterIssuer" } else { "Issuer" }), fx::CYAN), bold(i.name.clone(), TEXT)]),
+                Line::from(vec![
+                    bold(format!("{} ", if i.cluster { "ClusterIssuer" } else { "Issuer" }), fx::CYAN),
+                    bold(i.name.clone(), TEXT),
+                ]),
                 kv("type", i.kind.clone()),
-                Line::from(vec![st(format!("{:<10}", "status"), fx::STEEL), st(if i.ready { "Ready" } else { "NOT READY" }, if i.ready { fx::GREEN } else { fx::RED })]),
+                Line::from(vec![
+                    st(format!("{:<10}", "status"), fx::STEEL),
+                    st(if i.ready { "Ready" } else { "NOT READY" }, if i.ready { fx::GREEN } else { fx::RED }),
+                ]),
                 Line::from(st(format!("          {}", i.message), fx::STEEL)),
                 Line::raw(""),
                 section("certificates"),
             ];
             for c in net.certs.iter().filter(|c| c.issuer == key && (i.cluster || c.namespace == i.namespace) && !c.name.ends_with(')')) {
-                let days = c.days_left.map(|d| format!("{d}d")).unwrap_or_else(|| if c.ready { "ready".into() } else { "NOT READY".into() });
-                l.push(Line::from(vec![st("  • ", health_rgb(c.health())), st(pad(&format!("{}/{}", c.namespace, c.name), 40), TEXT), st(days, health_rgb(c.health()))]));
+                let days =
+                    c.days_left.map(|d| format!("{d}d")).unwrap_or_else(|| if c.ready { "ready".into() } else { "NOT READY".into() });
+                l.push(Line::from(vec![
+                    st("  • ", health_rgb(c.health())),
+                    st(pad(&format!("{}/{}", c.namespace, c.name), 40), TEXT),
+                    st(days, health_rgb(c.health())),
+                ]));
             }
             l
         }
@@ -645,9 +734,16 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
             let vols: Vec<_> = app.snap.storage.volumes.iter().filter(|v| v.class == c.name).collect();
             let total: i64 = vols.iter().filter_map(|v| v.size()).sum();
             let mut l = vec![
-                Line::from(vec![bold("StorageClass ", fx::CYAN), bold(c.name.clone(), TEXT), st(if c.default { "  (default)" } else { "" }, fx::CYAN)]),
+                Line::from(vec![
+                    bold("StorageClass ", fx::CYAN),
+                    bold(c.name.clone(), TEXT),
+                    st(if c.default { "  (default)" } else { "" }, fx::CYAN),
+                ]),
                 kv("provisioner", c.provisioner.clone()),
-                Line::from(vec![st(format!("{:<10}", "where"), fx::STEEL), st(format!("{}: {}", c.location.short(), c.location.what()), location_rgb(&c.location))]),
+                Line::from(vec![
+                    st(format!("{:<10}", "where"), fx::STEEL),
+                    st(format!("{}: {}", c.location.short(), c.location.what()), location_rgb(&c.location)),
+                ]),
                 kv("reclaim", c.reclaim.clone()),
                 kv("binding", c.binding.clone()),
                 kv("expand", if c.expansion { "allowed" } else { "not allowed" }),
@@ -655,15 +751,20 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
                 section(&format!("volumes ({}, {})", vols.len(), fmt_mem(total))),
             ];
             for v in vols {
-                l.push(Line::from(vec![st("  • ", health_rgb(v.health(app.measurement(v)))), st(format!("{}/{}", v.group(), v.name()), TEXT), st(format!("  {}", v.size().map(fmt_mem).unwrap_or_default()), fx::STEEL)]));
+                l.push(Line::from(vec![
+                    st("  • ", health_rgb(v.health(app.measurement(v)))),
+                    st(format!("{}/{}", v.group(), v.name()), TEXT),
+                    st(format!("  {}", v.size().map(fmt_mem).unwrap_or_default()), fx::STEEL),
+                ]));
             }
             l
         }
         OpsRef::Role(r) => {
             let rbac = &app.snap.rbac;
-            let mut l = vec![
-                Line::from(vec![bold(format!("{} ", if r.cluster { "ClusterRole" } else { "Role" }), fx::AMBER), bold(if r.cluster { r.name.clone() } else { format!("{}/{}", r.namespace, r.name) }, TEXT)]),
-            ];
+            let mut l = vec![Line::from(vec![
+                bold(format!("{} ", if r.cluster { "ClusterRole" } else { "Role" }), fx::AMBER),
+                bold(if r.cluster { r.name.clone() } else { format!("{}/{}", r.namespace, r.name) }, TEXT),
+            ])];
             if r.aggregated {
                 l.push(Line::from(st("aggregated ClusterRole (rules filled in from labelled roles)", fx::STEEL)));
             }
@@ -674,7 +775,11 @@ pub fn detail_lines(app: &App, o: &OpsRef, width: usize) -> Vec<Line<'static>> {
             l.push(section("bound to"));
             for b in rbac.bindings.iter().filter(|b| rbac.role_of(b).is_some_and(|x| std::ptr::eq(x, *r))) {
                 let subjects: Vec<String> = b.subjects.iter().map(Subject::label).collect();
-                l.push(Line::from(vec![st(format!("  {} ", b.name), TEXT), st(format!("({}) ", b.scope()), fx::STEEL), st(subjects.join(", "), fx::CYAN)]));
+                l.push(Line::from(vec![
+                    st(format!("  {} ", b.name), TEXT),
+                    st(format!("({}) ", b.scope()), fx::STEEL),
+                    st(subjects.join(", "), fx::CYAN),
+                ]));
             }
             l
         }
@@ -701,7 +806,14 @@ fn rollout_detail(app: &App, r: &RolloutInfo, t: f64, width: usize) -> Vec<Line<
     let mut cells = vec![st("  ", TEXT)];
     for i in 0..r.desired.min(60) {
         let (glyph, rgb) = if i < r.updated {
-            ("■ ", if r.phase == Phase::Progressing && i == r.updated - 1 && fx::pulse(t, 0.8) < 0.5 { fx::mix(fx::CYAN, fx::BG, 0.6) } else { fx::CYAN })
+            (
+                "■ ",
+                if r.phase == Phase::Progressing && i == r.updated - 1 && fx::pulse(t, 0.8) < 0.5 {
+                    fx::mix(fx::CYAN, fx::BG, 0.6)
+                } else {
+                    fx::CYAN
+                },
+            )
         } else if i < r.ready.max(r.updated) {
             ("■ ", fx::STEEL)
         } else {
@@ -741,7 +853,10 @@ fn rollout_detail(app: &App, r: &RolloutInfo, t: f64, width: usize) -> Vec<Line<
                 Some(cur) if i == cur => ("▶", if r.paused { fx::AMBER } else { fx::CYAN }),
                 _ => (" ", fx::STEEL),
             };
-            l.push(Line::from(vec![st(format!("  {mark} {:>2}  ", i + 1), rgb), st(step.clone(), if mark == " " { fx::STEEL } else { TEXT })]));
+            l.push(Line::from(vec![
+                st(format!("  {mark} {:>2}  ", i + 1), rgb),
+                st(step.clone(), if mark == " " { fx::STEEL } else { TEXT }),
+            ]));
         }
     }
     if !r.history.is_empty() {
@@ -753,11 +868,14 @@ fn rollout_detail(app: &App, r: &RolloutInfo, t: f64, width: usize) -> Vec<Line<
             l.push(Line::from(vec![
                 st(format!("  {}r{:<4}", if current { "▶" } else { " " }, h.revision), if current { fx::MAGENTA } else { fx::STEEL }),
                 st(format!("{:<12}", pad(&h.name, 11)), fx::STEEL),
-                st(role, match h.role {
-                    Some("canary") | Some("preview") => fx::MAGENTA,
-                    Some(_) => fx::GREEN,
-                    None => fx::STEEL,
-                }),
+                st(
+                    role,
+                    match h.role {
+                        Some("canary") | Some("preview") => fx::MAGENTA,
+                        Some(_) => fx::GREEN,
+                        None => fx::STEEL,
+                    },
+                ),
                 st(format!("{:>2}/{:<2} ", h.ready, h.replicas), if h.replicas > 0 { TEXT } else { fx::STEEL }),
                 st(format!("{:<6}", h.age), fx::STEEL),
                 st(pad(h.image.rsplit('/').next().unwrap_or(&h.image), 40), if h.replicas > 0 { TEXT } else { fx::STEEL }),
@@ -797,7 +915,11 @@ fn rollout_detail(app: &App, r: &RolloutInfo, t: f64, width: usize) -> Vec<Line<
 
 fn app_detail(app: &App, a: &crate::gitops::AppInfo) -> Vec<Line<'static>> {
     let mut l = vec![
-        Line::from(vec![bold("Application ", fx::GREEN), bold(format!("{}/{}", a.namespace, a.name), TEXT), st(format!("  project {}", a.project), fx::STEEL)]),
+        Line::from(vec![
+            bold("Application ", fx::GREEN),
+            bold(format!("{}/{}", a.namespace, a.name), TEXT),
+            st(format!("  project {}", a.project), fx::STEEL),
+        ]),
         Line::from(vec![
             st(format!("{:<10}", "status"), fx::STEEL),
             bold(a.sync.clone(), sync_rgb(&a.sync)),
@@ -946,7 +1068,10 @@ fn rule_line(r: &Rule) -> Line<'static> {
 }
 
 fn subject_detail(rbac: &RbacInfo, s: &Subject, bindings: &[&BindingInfo]) -> Vec<Line<'static>> {
-    let mut l = vec![Line::from(vec![bold(format!("{} ", s.kind), fx::AMBER), bold(if s.namespace.is_empty() { s.name.clone() } else { format!("{}/{}", s.namespace, s.name) }, TEXT)])];
+    let mut l = vec![Line::from(vec![
+        bold(format!("{} ", s.kind), fx::AMBER),
+        bold(if s.namespace.is_empty() { s.name.clone() } else { format!("{}/{}", s.namespace, s.name) }, TEXT),
+    ])];
     if rbac.missing_sa(s) {
         l.push(Line::from(st("ServiceAccount does not exist — stale binding (and a name someone could claim)", fx::AMBER)));
     }
@@ -985,11 +1110,7 @@ fn confirm(f: &mut Frame, area: Rect, app: &App) {
     let (verb, kind, target) = c.pending.title();
     let rgb = if danger { fx::RED } else { fx::AMBER };
     let lines = vec![
-        Line::from(vec![
-            bold(format!("{verb} "), rgb),
-            st(format!("{kind} "), fx::STEEL),
-            bold(target, TEXT),
-        ]),
+        Line::from(vec![bold(format!("{verb} "), rgb), st(format!("{kind} "), fx::STEEL), bold(target, TEXT)]),
         Line::from(st(c.explain.clone(), fx::STEEL)),
     ];
     let mut lines = lines;
@@ -1044,7 +1165,11 @@ fn rev_picker(f: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::raw(""));
     for (i, rev) in candidates.iter().enumerate() {
         let selected = i == sel;
-        let style = if selected { Style::new().fg(fx::c(TEXT)).bg(fx::fade(fx::MAGENTA, 0.2)).add_modifier(Modifier::BOLD) } else { Style::new().fg(fx::c(TEXT)) };
+        let style = if selected {
+            Style::new().fg(fx::c(TEXT)).bg(fx::fade(fx::MAGENTA, 0.2)).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(fx::c(TEXT))
+        };
         let tag = if Some(rev.revision) == default {
             "previous"
         } else if rev.revision > r.revision {
@@ -1082,7 +1207,9 @@ fn rev_picker(f: &mut Frame, area: Rect, app: &App) {
 fn volume_detail(app: &App, v: &VolumeInfo, t: f64) -> Vec<Line<'static>> {
     let measured = app.measured.get(v.pv.as_deref().unwrap_or_default());
     let title = match (&v.namespace, &v.claim, &v.pv) {
-        (Some(ns), Some(c), Some(pv)) => vec![bold("PVC ", fx::CYAN), bold(format!("{ns}/{c}"), TEXT), st(format!("  → PV {pv}"), fx::STEEL)],
+        (Some(ns), Some(c), Some(pv)) => {
+            vec![bold("PVC ", fx::CYAN), bold(format!("{ns}/{c}"), TEXT), st(format!("  → PV {pv}"), fx::STEEL)]
+        }
         (Some(ns), Some(c), None) => vec![bold("PVC ", fx::CYAN), bold(format!("{ns}/{c}"), TEXT), st("  → no volume yet", fx::RED)],
         (_, _, Some(pv)) => vec![bold("PV ", fx::CYAN), bold(pv.clone(), TEXT), st("  (no claim)", fx::STEEL)],
         _ => vec![],
@@ -1100,20 +1227,32 @@ fn volume_detail(app: &App, v: &VolumeInfo, t: f64) -> Vec<Line<'static>> {
     if !v.detail.is_empty() {
         l.push(kv(if v.kind == "csi" { "handle" } else { "path" }, v.detail.clone()));
     }
-    l.push(kv("node", match (&v.node, v.mounted_by.first()) {
-        (Some(n), _) => format!("{n} (pinned by nodeAffinity)"),
-        (None, Some((_, n))) => format!("{n} (where it is mounted now)"),
-        _ => "—".into(),
-    }));
-    l.push(kv("size", format!(
-        "requested {} · capacity {}",
-        v.requested.map(fmt_mem).unwrap_or_else(|| "—".into()),
-        v.capacity.map(fmt_mem).unwrap_or_else(|| "—".into())
-    )));
+    l.push(kv(
+        "node",
+        match (&v.node, v.mounted_by.first()) {
+            (Some(n), _) => format!("{n} (pinned by nodeAffinity)"),
+            (None, Some((_, n))) => format!("{n} (where it is mounted now)"),
+            _ => "—".into(),
+        },
+    ));
+    l.push(kv(
+        "size",
+        format!(
+            "requested {} · capacity {}",
+            v.requested.map(fmt_mem).unwrap_or_else(|| "—".into()),
+            v.capacity.map(fmt_mem).unwrap_or_else(|| "—".into())
+        ),
+    ));
     match used_of(app, v) {
         Some((used, size, source)) if size > 0 => {
             let frac = used as f64 / size as f64;
-            let rgb = if frac >= 0.95 { fx::RED } else if frac >= 0.85 { fx::AMBER } else { fx::GREEN };
+            let rgb = if frac >= 0.95 {
+                fx::RED
+            } else if frac >= 0.85 {
+                fx::AMBER
+            } else {
+                fx::GREEN
+            };
             let mut s = vec![st(format!("{:<10}", "used"), fx::STEEL)];
             s.extend(bar((used.min(size) >> 20) as i32, (size >> 20) as i32, 18, rgb, t, false));
             s.push(st(format!(" {:.0}%  {} of {}", frac * 100.0, fmt_mem(used), fmt_mem(size)), rgb));
@@ -1133,7 +1272,10 @@ fn volume_detail(app: &App, v: &VolumeInfo, t: f64) -> Vec<Line<'static>> {
             let pct = if m.fs_size > 0 { m.fs_used as f64 * 100.0 / m.fs_size as f64 } else { 0.0 };
             l.push(Line::from(vec![
                 st(format!("{:<10}", "on disk"), fx::STEEL),
-                st(format!("{} — {} of {} used ({pct:.0}%)", m.device, fmt_mem(m.fs_used), fmt_mem(m.fs_size)), if pct > 85.0 { fx::AMBER } else { TEXT }),
+                st(
+                    format!("{} — {} of {} used ({pct:.0}%)", m.device, fmt_mem(m.fs_used), fmt_mem(m.fs_size)),
+                    if pct > 85.0 { fx::AMBER } else { TEXT },
+                ),
             ]));
         }
         Some(Err(e)) => l.push(Line::from(vec![st(format!("{:<10}", "measure"), fx::STEEL), st(e.clone(), fx::RED)])),
@@ -1142,11 +1284,26 @@ fn volume_detail(app: &App, v: &VolumeInfo, t: f64) -> Vec<Line<'static>> {
                 && let Some(n) = v.measure_node()
                 && let Some(fs) = app.snap.storage.node_fs.get(&n)
             {
-                l.push(kv("node disk", format!("{} of {} used on {n} (kubelet; shared with everything else on the node)", fmt_mem(fs.used), fmt_mem(fs.capacity))));
+                l.push(kv(
+                    "node disk",
+                    format!(
+                        "{} of {} used on {n} (kubelet; shared with everything else on the node)",
+                        fmt_mem(fs.used),
+                        fmt_mem(fs.capacity)
+                    ),
+                ));
             }
         }
     }
-    l.push(kv("access", format!("{}  reclaim {}  class {}", v.access.join(","), if v.reclaim.is_empty() { "—" } else { &v.reclaim }, if v.class.is_empty() { "—" } else { &v.class })));
+    l.push(kv(
+        "access",
+        format!(
+            "{}  reclaim {}  class {}",
+            v.access.join(","),
+            if v.reclaim.is_empty() { "—" } else { &v.reclaim },
+            if v.class.is_empty() { "—" } else { &v.class }
+        ),
+    ));
     l.push(Line::raw(""));
     l.push(section("mounted by"));
     if v.mounted_by.is_empty() {

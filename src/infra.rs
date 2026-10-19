@@ -266,7 +266,12 @@ mod tests {
 
     #[test]
     fn managed_services() {
-        let eks = node("ip-10-0-1-5.ec2.internal", &[("eks.amazonaws.com/nodegroup", "ng-1"), ("node.kubernetes.io/instance-type", "m5.large")], "aws:///eu-west-1a/i-1", None);
+        let eks = node(
+            "ip-10-0-1-5.ec2.internal",
+            &[("eks.amazonaws.com/nodegroup", "ng-1"), ("node.kubernetes.io/instance-type", "m5.large")],
+            "aws:///eu-west-1a/i-1",
+            None,
+        );
         let i = classify("https://ABC.gr7.eu-west-1.eks.amazonaws.com", "v1.30.2-eks-1552ad0", std::slice::from_ref(&eks), &[]);
         assert_eq!(i.hosting, Hosting::Managed("EKS"));
         assert_eq!(i.badge(), "managed EKS");

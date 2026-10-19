@@ -2,10 +2,10 @@ pub mod galaxy;
 mod labels;
 mod map;
 pub mod ops;
-mod picker;
-mod storage_map;
 mod panels;
+mod picker;
 mod radar;
+mod storage_map;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -22,8 +22,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     f.render_widget(Block::new().style(Style::new().bg(fx::c(fx::BG))), area);
 
     let [header, body, ticker, footer] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(5), Constraint::Length(1)])
-            .areas(area);
+        Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(5), Constraint::Length(1)]).areas(area);
     let [main, side] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(46)]).areas(body);
 
     panels::header(f, header, app);
@@ -57,14 +56,11 @@ pub fn health_rgb(h: Health) -> Rgb {
 /// Neon frame used by every panel.
 pub fn frame(title: &str, accent: Rgb, focused: bool) -> Block<'static> {
     let border = if focused { fx::c(accent) } else { fx::fade(accent, 0.45) };
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(border))
-        .title(Line::from(vec![
-            Span::styled(" ◆ ", Style::new().fg(fx::c(accent))),
-            Span::styled(title.to_string(), Style::new().fg(fx::c(accent)).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-        ]))
+    Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(border)).title(Line::from(vec![
+        Span::styled(" ◆ ", Style::new().fg(fx::c(accent))),
+        Span::styled(title.to_string(), Style::new().fg(fx::c(accent)).add_modifier(Modifier::BOLD)),
+        Span::raw(" "),
+    ]))
 }
 
 /// Canvas units such that one x unit is one column and one y unit is half a row —

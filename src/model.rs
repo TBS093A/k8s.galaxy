@@ -85,15 +85,8 @@ pub struct PodInfo {
     pub requests: crate::metrics::Usage,
 }
 
-const BAD_REASONS: &[&str] = &[
-    "CrashLoopBackOff",
-    "Error",
-    "ImagePullBackOff",
-    "ErrImagePull",
-    "OOMKilled",
-    "CreateContainerConfigError",
-    "InvalidImageName",
-];
+const BAD_REASONS: &[&str] =
+    &["CrashLoopBackOff", "Error", "ImagePullBackOff", "ErrImagePull", "OOMKilled", "CreateContainerConfigError", "InvalidImageName"];
 
 impl PodInfo {
     pub fn health(&self) -> Health {
@@ -233,8 +226,7 @@ impl Snapshot {
     }
 
     pub fn alerts(&self) -> usize {
-        self.nodes.iter().filter(|n| n.health() == Health::Bad).count()
-            + self.pods.iter().filter(|p| p.health() == Health::Bad).count()
+        self.nodes.iter().filter(|n| n.health() == Health::Bad).count() + self.pods.iter().filter(|p| p.health() == Health::Bad).count()
     }
 
     /// Pods controlled by a workload; Deployments go through their ReplicaSets.
@@ -255,10 +247,7 @@ impl Snapshot {
         let mut pods: Vec<_> = self
             .pods
             .iter()
-            .filter(|p| {
-                p.namespace == w.namespace
-                    && p.owner.as_ref().is_some_and(|(k, n)| owners.contains(&(k.as_str(), n.as_str())))
-            })
+            .filter(|p| p.namespace == w.namespace && p.owner.as_ref().is_some_and(|(k, n)| owners.contains(&(k.as_str(), n.as_str()))))
             .collect();
         pods.sort_by(|a, b| (a.health(), &a.name).cmp(&(b.health(), &b.name)));
         pods

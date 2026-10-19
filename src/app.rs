@@ -5,13 +5,13 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::gitops::{AppAction, AppInfo};
 use crate::kubeconfigs::{ClusterEntry, Probe};
-use crate::source::Target;
 use crate::metrics::Usage;
+use crate::model::{Health, HelmRelease, PodInfo, Snapshot, WorkloadInfo, WorkloadKind};
+use crate::ops::{Action, ActionKind, BindingInfo, CertInfo, GatewayInfo, IssuerInfo, RoleInfo, RolloutInfo, RouteInfo, Subject};
+use crate::source::Cmd;
+use crate::source::Target;
 use crate::storage::{ClassInfo, Measured, Target as MeasureTarget, VolumeInfo};
 use std::collections::BTreeMap;
-use crate::ops::{Action, ActionKind, BindingInfo, CertInfo, GatewayInfo, IssuerInfo, RoleInfo, RolloutInfo, RouteInfo, Subject};
-use crate::model::{Health, HelmRelease, PodInfo, Snapshot, WorkloadInfo, WorkloadKind};
-use crate::source::Cmd;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -26,7 +26,8 @@ pub enum View {
 }
 
 impl View {
-    pub const ALL: [View; 8] = [View::Map, View::Galaxy, View::Radar, View::Rollouts, View::Network, View::Access, View::Argo, View::Storage];
+    pub const ALL: [View; 8] =
+        [View::Map, View::Galaxy, View::Radar, View::Rollouts, View::Network, View::Access, View::Argo, View::Storage];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -134,13 +135,25 @@ impl OpsRef<'_> {
             OpsRef::Route(r) => r.namespace.clone(),
             OpsRef::Gateway(g) => g.namespace.clone(),
             OpsRef::Cert(c) => c.namespace.clone(),
-            OpsRef::Issuer(i) => if i.cluster { "(cluster)".into() } else { i.namespace.clone() },
+            OpsRef::Issuer(i) => {
+                if i.cluster {
+                    "(cluster)".into()
+                } else {
+                    i.namespace.clone()
+                }
+            }
             OpsRef::Subject(s, _) => match s.kind.as_str() {
                 "ServiceAccount" => format!("sa {}", s.namespace),
                 "Group" => "groups".into(),
                 _ => "users".into(),
             },
-            OpsRef::Role(r) => if r.cluster { "(cluster)".into() } else { r.namespace.clone() },
+            OpsRef::Role(r) => {
+                if r.cluster {
+                    "(cluster)".into()
+                } else {
+                    r.namespace.clone()
+                }
+            }
             OpsRef::App(a) => format!("project {}", a.project),
             OpsRef::Volume(v) => v.group(),
             OpsRef::Class(_) => "(cluster)".into(),
@@ -194,7 +207,9 @@ impl Pending {
     fn cmd(&self) -> Cmd {
         match self {
             Pending::Rollout(a) => Cmd::Action(a.clone()),
-            Pending::App { namespace, name, action } => Cmd::AppAction { namespace: namespace.clone(), name: name.clone(), action: *action },
+            Pending::App { namespace, name, action } => {
+                Cmd::AppAction { namespace: namespace.clone(), name: name.clone(), action: *action }
+            }
             Pending::Measure(t) => Cmd::Measure(t.clone()),
         }
     }
@@ -517,12 +532,7 @@ impl App {
             ResKind::Helm => self.snap.helm.iter().map(Res::Helm).collect(),
             kind => {
                 let wk = kind.workload();
-                self.snap
-                    .workloads
-                    .iter()
-                    .filter(|w| Some(w.kind) == wk && !w.is_stale())
-                    .map(Res::Workload)
-                    .collect()
+                self.snap.workloads.iter().filter(|w| Some(w.kind) == wk && !w.is_stale()).map(Res::Workload).collect()
             }
         };
         items.sort_by(|a, b| (a.namespace(), a.health(), a.name()).cmp(&(b.namespace(), b.health(), b.name())));
@@ -574,13 +584,9 @@ impl App {
             None => vec![],
             Some(Res::Pod(p)) => vec![(&p.namespace, &p.name)],
             Some(Res::Workload(w)) => self.snap.pods_of(w).into_iter().map(|p| (p.namespace.as_str(), p.name.as_str())).collect(),
-            Some(Res::Helm(h)) => self
-                .snap
-                .pods
-                .iter()
-                .filter(|p| p.namespace == h.namespace)
-                .map(|p| (p.namespace.as_str(), p.name.as_str()))
-                .collect(),
+            Some(Res::Helm(h)) => {
+                self.snap.pods.iter().filter(|p| p.namespace == h.namespace).map(|p| (p.namespace.as_str(), p.name.as_str())).collect()
+            }
         }
     }
 
@@ -592,18 +598,14 @@ impl App {
             View::Rollouts => self.snap.rollouts.iter().map(|r| (r.health(), OpsRef::Rollout(r))).collect(),
             View::Network => match self.net_tab {
                 NetTab::Routes => net.routes.iter().map(|r| (net.route_health(r), OpsRef::Route(r))).collect(),
-                NetTab::Gateways => net
-                    .gateways
-                    .iter()
-                    .map(|g| (if g.programmed { Health::Ok } else { Health::Bad }, OpsRef::Gateway(g)))
-                    .collect(),
+                NetTab::Gateways => {
+                    net.gateways.iter().map(|g| (if g.programmed { Health::Ok } else { Health::Bad }, OpsRef::Gateway(g))).collect()
+                }
                 // Listener certs mirrored into route namespaces are shown once, at their source.
                 NetTab::Certs => net.certs.iter().filter(|c| !c.name.ends_with(')')).map(|c| (c.health(), OpsRef::Cert(c))).collect(),
-                NetTab::Issuers => net
-                    .issuers
-                    .iter()
-                    .map(|i| (if i.ready { Health::Ok } else { Health::Bad }, OpsRef::Issuer(i)))
-                    .collect(),
+                NetTab::Issuers => {
+                    net.issuers.iter().map(|i| (if i.ready { Health::Ok } else { Health::Bad }, OpsRef::Issuer(i))).collect()
+                }
             },
             View::Access => match self.rbac_tab {
                 RbacTab::Subjects => rbac
@@ -641,9 +643,21 @@ impl App {
         match o {
             OpsRef::Rollout(r) => r.health(),
             OpsRef::Route(r) => self.snap.net.route_health(r),
-            OpsRef::Gateway(g) => if g.programmed { Health::Ok } else { Health::Bad },
+            OpsRef::Gateway(g) => {
+                if g.programmed {
+                    Health::Ok
+                } else {
+                    Health::Bad
+                }
+            }
             OpsRef::Cert(c) => c.health(),
-            OpsRef::Issuer(i) => if i.ready { Health::Ok } else { Health::Bad },
+            OpsRef::Issuer(i) => {
+                if i.ready {
+                    Health::Ok
+                } else {
+                    Health::Bad
+                }
+            }
             OpsRef::Subject(s, b) => {
                 let h = rbac.subject_risk(b).map_or(Health::Ok, |(h, _)| h);
                 if rbac.missing_sa(s) { h.min(Health::Warn) } else { h }
@@ -770,18 +784,39 @@ impl App {
             .filter_map(|v| Some(MeasureTarget { pv: v.pv.clone()?, node: v.measure_node()?, path: v.detail.clone() }))
             .collect();
         if targets.is_empty() {
-            self.toast = Some(Toast { text: "nothing to measure: no hostPath/local volumes with a known node".into(), ok: false, at: Instant::now() });
+            self.toast = Some(Toast {
+                text: "nothing to measure: no hostPath/local volumes with a known node".into(),
+                ok: false,
+                at: Instant::now(),
+            });
             return;
         }
         if self.read_only {
-            self.toast = Some(Toast { text: "read-only mode (--read-only): measuring creates pods, disabled".into(), ok: false, at: Instant::now() });
+            self.toast = Some(Toast {
+                text: "read-only mode (--read-only): measuring creates pods, disabled".into(),
+                ok: false,
+                at: Instant::now(),
+            });
             return;
         }
         let nodes: std::collections::BTreeSet<&str> = targets.iter().map(|t| t.node.as_str()).collect();
         let warnings = vec![
-            (Health::Warn, format!("creates one short-lived pod per node ({}) in namespace default: busybox:1.36, the directories mounted read-only, deleted when done", nodes.into_iter().collect::<Vec<_>>().join(", "))),
-            (Health::Ok, "the kubelet does not report usage of hostPath/local volumes; du walks the directories (seconds, minutes on big ones)".into()),
-            (Health::Ok, "needs: create/delete pods in default, hostPath allowed there (Pod Security), busybox pullable by the nodes".into()),
+            (
+                Health::Warn,
+                format!(
+                    "creates one short-lived pod per node ({}) in namespace default: busybox:1.36, the directories mounted read-only, deleted when done",
+                    nodes.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            ),
+            (
+                Health::Ok,
+                "the kubelet does not report usage of hostPath/local volumes; du walks the directories (seconds, minutes on big ones)"
+                    .into(),
+            ),
+            (
+                Health::Ok,
+                "needs: create/delete pods in default, hostPath allowed there (Pod Security), busybox pullable by the nodes".into(),
+            ),
         ];
         let explain = "du + df of each volume's directory on its node".to_string();
         self.confirm = Some(Confirm { pending: Pending::Measure(targets), explain, warnings });
@@ -790,7 +825,8 @@ impl App {
     pub fn measured(&mut self, res: Result<crate::storage::Measurements, String>) {
         match res {
             Ok(list) if list.is_empty() => {
-                self.toast = Some(Toast { text: "dry-run OK: measuring pods validated by the API server".into(), ok: true, at: Instant::now() })
+                self.toast =
+                    Some(Toast { text: "dry-run OK: measuring pods validated by the API server".into(), ok: true, at: Instant::now() })
             }
             Ok(list) => {
                 let failed = list.iter().filter(|(_, r)| r.is_err()).count();
@@ -924,7 +960,11 @@ impl App {
         let (verb, resource) = match parts.as_slice() {
             [v, r, ..] => (*v, *r),
             _ => {
-                self.toast = Some(Toast { text: "who-can: type `verb resource [namespace]`, e.g. `get secrets`".into(), ok: false, at: Instant::now() });
+                self.toast = Some(Toast {
+                    text: "who-can: type `verb resource [namespace]`, e.g. `get secrets`".into(),
+                    ok: false,
+                    at: Instant::now(),
+                });
                 return;
             }
         };
@@ -935,7 +975,11 @@ impl App {
         let namespace = parts.get(2).copied();
         let who = self.snap.rbac.who_can(verb, resource, group, namespace);
         let mut lines = vec![
-            format!("who can {verb} {resource}{}{}", if group.is_empty() { String::new() } else { format!(".{group}") }, namespace.map(|n| format!(" in {n}")).unwrap_or_default()),
+            format!(
+                "who can {verb} {resource}{}{}",
+                if group.is_empty() { String::new() } else { format!(".{group}") },
+                namespace.map(|n| format!(" in {n}")).unwrap_or_default()
+            ),
             "(from RoleBindings/ClusterRoleBindings in the cluster; resourceNames-restricted rules are skipped)".into(),
             String::new(),
         ];
@@ -1007,10 +1051,12 @@ impl App {
                         Some(OpsRef::Rollout(r)) if r.paused => ActionKind::Resume,
                         _ => ActionKind::Pause,
                     },
-                    'u' => return {
-                        self.request_undo();
-                        true
-                    },
+                    'u' => {
+                        return {
+                            self.request_undo();
+                            true
+                        };
+                    }
                     'P' => ActionKind::Promote,
                     'F' => ActionKind::PromoteFull,
                     'A' => ActionKind::Abort,
@@ -1116,7 +1162,8 @@ impl App {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                     let _ = self.cmds.send(c.pending.cmd());
-                    self.toast = Some(Toast { text: format!("sending {}…", c.pending.title().0.to_lowercase()), ok: true, at: Instant::now() });
+                    self.toast =
+                        Some(Toast { text: format!("sending {}…", c.pending.title().0.to_lowercase()), ok: true, at: Instant::now() });
                     self.confirm = None;
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => self.confirm = None,
@@ -1189,21 +1236,19 @@ impl App {
                 lines.push(String::new());
                 lines.push(format!("{} pods", pods.len()));
                 lines.extend(pods.iter().map(|p| {
-                    format!(
-                        "  {:<20} {:<52} {:<16} r:{}",
-                        p.status(),
-                        p.name,
-                        p.node.as_deref().unwrap_or("<unscheduled>"),
-                        p.restarts
-                    )
+                    format!("  {:<20} {:<52} {:<16} r:{}", p.status(), p.name, p.node.as_deref().unwrap_or("<unscheduled>"), p.restarts)
                 }));
                 (format!("{} {}", w.kind.as_str(), w.name), lines)
             }
             Some(Res::Helm(h)) => {
                 let ns_pods: Vec<_> = self.snap.pods.iter().filter(|p| p.namespace == h.namespace).collect();
                 let bad = ns_pods.iter().filter(|p| p.health() == Health::Bad).count();
-                let workloads: Vec<_> =
-                    self.snap.workloads.iter().filter(|w| w.namespace == h.namespace && !w.is_stale() && w.kind != WorkloadKind::ReplicaSet).collect();
+                let workloads: Vec<_> = self
+                    .snap
+                    .workloads
+                    .iter()
+                    .filter(|w| w.namespace == h.namespace && !w.is_stale() && w.kind != WorkloadKind::ReplicaSet)
+                    .collect();
                 let mut lines = vec![
                     format!("release      {}", h.name),
                     format!("namespace    {}", h.namespace),
@@ -1225,11 +1270,7 @@ impl App {
 
     fn open_logs(&mut self) {
         let Some(pod) = self.selected_pod() else { return };
-        let cmd = Cmd::Logs {
-            namespace: pod.namespace.clone(),
-            pod: pod.name.clone(),
-            container: pod.containers.first().cloned(),
-        };
+        let cmd = Cmd::Logs { namespace: pod.namespace.clone(), pod: pod.name.clone(), container: pod.containers.first().cloned() };
         let title = format!("{}/{}", pod.namespace, pod.name);
         let _ = self.cmds.send(cmd);
         self.logs = Some(LogView { title, lines: vec![], scroll: 0, loading: true, is_log: true });

@@ -144,12 +144,15 @@ impl Sim {
                 p.reason = Some(reason.into());
                 p.ready = false;
                 p.restarts += 1;
-                self.warnings.insert(0, EventInfo {
-                    reason: "BackOff".into(),
-                    object: format!("pod/{}", p.name),
-                    message: format!("Back-off restarting failed container {} ({reason})", p.containers[0]),
-                    count: p.restarts,
-                });
+                self.warnings.insert(
+                    0,
+                    EventInfo {
+                        reason: "BackOff".into(),
+                        object: format!("pod/{}", p.name),
+                        message: format!("Back-off restarting failed container {} ({reason})", p.containers[0]),
+                        count: p.restarts,
+                    },
+                );
             }
         }
         for p in self.pods.iter_mut().filter(|p| p.reason.is_some()) {
@@ -162,12 +165,15 @@ impl Sim {
             let n = &mut self.nodes[3];
             n.ready = !n.ready;
             if !n.ready {
-                self.warnings.insert(0, EventInfo {
-                    reason: "NodeNotReady".into(),
-                    object: format!("node/{}", n.name),
-                    message: "Kubelet stopped posting node status".into(),
-                    count: 1,
-                });
+                self.warnings.insert(
+                    0,
+                    EventInfo {
+                        reason: "NodeNotReady".into(),
+                        object: format!("node/{}", n.name),
+                        message: "Kubelet stopped posting node status".into(),
+                        count: 1,
+                    },
+                );
             }
         }
         self.warnings.truncate(50);
@@ -229,7 +235,7 @@ impl Sim {
             apps: self.ops.apps(),
             metrics: Some(self.metrics()),
             storage: crate::demo_ops::demo_storage(),
-                    infra: Default::default(),
+            infra: Default::default(),
             helm: self.helm(),
             fetched_at: Instant::now(),
             error: None,
@@ -251,7 +257,13 @@ impl Sim {
         // Real nodes cannot hand out more than they have.
         for n in &self.nodes {
             if let Some(u) = m.nodes.get_mut(n.name) {
-                let alloc = if n.control_plane { (3800, 7i64 << 30) } else if n.name == "homelab-waw-1" { (2000, 6 << 30) } else { (7800, 30 << 30) };
+                let alloc = if n.control_plane {
+                    (3800, 7i64 << 30)
+                } else if n.name == "homelab-waw-1" {
+                    (2000, 6 << 30)
+                } else {
+                    (7800, 30 << 30)
+                };
                 u.cpu_m = u.cpu_m.min(alloc.0 * 97 / 100);
                 u.mem = u.mem.min(alloc.1 * 96 / 100);
             }
@@ -264,11 +276,9 @@ impl Sim {
         for &(ns, app, replicas) in APPS {
             let kind = kind_of(app, replicas, self.nodes.len());
             let (owner_kind, owner) = owner_name(app, kind);
-            let ready = self
-                .pods
-                .iter()
-                .filter(|p| p.ready && p.owner.as_ref().is_some_and(|(k, n)| *k == owner_kind && *n == owner))
-                .count() as i32;
+            let ready =
+                self.pods.iter().filter(|p| p.ready && p.owner.as_ref().is_some_and(|(k, n)| *k == owner_kind && *n == owner)).count()
+                    as i32;
             let base = WorkloadInfo {
                 kind,
                 name: app.into(),

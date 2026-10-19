@@ -106,7 +106,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     // Leave room under the top edge for the two label lines.
     let center = |i: usize| (cw * ((i % cols) as f64 + 0.5), h - ch * ((i / cols) as f64 + 0.5) - 2.0);
     let label_chars = (cw - 2.0).max(8.0) as usize;
-    let cut = |s: String| if s.chars().count() > label_chars { format!("{}…", s.chars().take(label_chars - 1).collect::<String>()) } else { s };
+    let cut =
+        |s: String| if s.chars().count() > label_chars { format!("{}…", s.chars().take(label_chars - 1).collect::<String>()) } else { s };
 
     // One size scale for every planet: the biggest volume gets ~a quarter of a node's radius.
     let max_gib = st.volumes.iter().filter_map(|v| v.size()).max().unwrap_or(GIB as i64) as f64 / GIB;
@@ -146,7 +147,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
     let provisioned: i64 = st.volumes.iter().filter(|v| v.pv.is_some()).filter_map(|v| v.size()).sum();
     let used: i64 = st.volumes.iter().filter_map(|v| used_of(app, v).map(|u| u.0)).sum();
     let known = st.volumes.iter().filter(|v| used_of(app, v).is_some()).count();
-    let external: i64 = st.volumes.iter().filter(|v| v.pv.is_some() && matches!(v.location, Location::External(_))).filter_map(|v| v.size()).sum();
+    let external: i64 =
+        st.volumes.iter().filter(|v| v.pv.is_some() && matches!(v.location, Location::External(_))).filter_map(|v| v.size()).sum();
     let title = format!(
         "STORAGE MAP   node disks {} / {} ({:.0}%)   volumes {} provisioned · {} used ({known} of {} measured)   external {}",
         fmt_mem(disk_used),
@@ -204,7 +206,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                         .collect();
                     ctx.draw(&Points { coords: &ring[lit..], color: fx::fade(fx::STEEL, 0.2) });
                     let rgb = fill_rgb(frac);
-                    ctx.draw(&Points { coords: &ring[..lit], color: fx::fade(rgb, if frac > 0.85 { 0.6 + 0.4 * pulse(t, 0.8) } else { 0.95 }) });
+                    ctx.draw(&Points {
+                        coords: &ring[..lit],
+                        color: fx::fade(rgb, if frac > 0.85 { 0.6 + 0.4 * pulse(t, 0.8) } else { 0.95 }),
+                    });
                 }
             }
 
@@ -250,10 +255,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App) {
                 let list = &hosts[&(*external, name.clone())];
                 let size: i64 = list.iter().filter_map(|v| v.size()).sum();
                 let used: i64 = list.iter().filter_map(|v| used_of(app, v).map(|u| u.0)).sum();
-                let label = format!("{} {name}  {}/{}", if *external { "→ external" } else { "◆ in-cluster pool" }, fmt_mem(used), fmt_mem(size));
+                let label =
+                    format!("{} {name}  {}/{}", if *external { "→ external" } else { "◆ in-cluster pool" }, fmt_mem(used), fmt_mem(size));
                 ctx.print(*x, y + host_h + 1.6, Span::styled(label, Style::new().fg(fx::c(if *external { fx::CYAN } else { fx::GREEN }))));
             }
-            if let Some((v, x, y)) = placed.iter().find(|(v, _, _)| selected.as_ref().is_some_and(|(g, n)| *g == v.group() && *n == v.name())) {
+            if let Some((v, x, y)) =
+                placed.iter().find(|(v, _, _)| selected.as_ref().is_some_and(|(g, n)| *g == v.group() && *n == v.name()))
+            {
                 let usage = match used_of(app, v) {
                     Some((u, s, _)) => format!("{}/{}", fmt_mem(u), fmt_mem(s)),
                     None => format!("?/{}", v.size().map(fmt_mem).unwrap_or_default()),

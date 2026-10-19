@@ -153,10 +153,7 @@ pub struct Place {
 }
 
 fn known_place(key: &str) -> Option<Place> {
-    PLACES
-        .iter()
-        .find(|p| p.0 == key)
-        .map(|&(_, lat, lon, city)| Place { lat, lon, label: format!("{city} ({key})") })
+    PLACES.iter().find(|p| p.0 == key).map(|&(_, lat, lon, city)| Place { lat, lon, label: format!("{city} ({key})") })
 }
 
 /// `KEY=LAT,LON` or `KEY=PLACE` (a table key like `fsn1`) for `--place`.

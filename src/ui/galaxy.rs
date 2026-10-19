@@ -92,7 +92,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
                             })
                             .collect();
                         ctx.draw(&Points { coords: &ring[lit..], color: fx::fade(fx::STEEL, 0.18) });
-                        ctx.draw(&Points { coords: &ring[..lit], color: fx::fade(rgb, if frac > 0.9 { 0.6 + 0.4 * pulse(t, 0.8) } else { 0.9 }) });
+                        ctx.draw(&Points {
+                            coords: &ring[..lit],
+                            color: fx::fade(rgb, if frac > 0.9 { 0.6 + 0.4 * pulse(t, 0.8) } else { 0.9 }),
+                        });
                     }
                 }
                 // Selection: rotating dashed halo.

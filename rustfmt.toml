@@ -1,0 +1,3 @@
+# Wide terminal-UI code: span vectors read better on one line.
+max_width = 140
+use_small_heuristics = "Max"

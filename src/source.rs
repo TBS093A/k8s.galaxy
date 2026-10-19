@@ -1,9 +1,9 @@
 //! Background data feed: polls the cluster (or the demo simulator) and pushes snapshots to the UI.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -17,14 +17,14 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::cloud::{self, CloudConfig, CloudInstance};
-use crate::infra;
-use crate::kubeconfigs::{self, ClusterEntry, Probe};
 use crate::demo::Sim;
 use crate::geo::Resolver;
 use crate::gitops::{self, AppAction, AppInfo};
+use crate::infra;
+use crate::kubeconfigs::{self, ClusterEntry, Probe};
 use crate::metrics::{self, Metrics, Usage};
-use crate::ops::{self, Action, Crds, NetInfo, RbacInfo};
 use crate::model::{EventInfo, HelmRelease, NodeInfo, PodInfo, Snapshot, WorkloadInfo, WorkloadKind};
+use crate::ops::{self, Action, Crds, NetInfo, RbacInfo};
 
 /// Traffic, RBAC and Helm change rarely and are bigger lists: they refresh in a background task
 /// on this clock, so a slow API server never holds up the live view.
@@ -54,8 +54,16 @@ type Shared = Arc<Mutex<SlowState>>;
 pub enum Cmd {
     Refresh,
     Action(Action),
-    AppAction { namespace: String, name: String, action: AppAction },
-    Logs { namespace: String, pod: String, container: Option<String> },
+    AppAction {
+        namespace: String,
+        name: String,
+        action: AppAction,
+    },
+    Logs {
+        namespace: String,
+        pod: String,
+        container: Option<String>,
+    },
     /// Connect to another cluster (the current one is dropped).
     Switch(Target),
     /// Probe these clusters (index in the app's list, entry).
@@ -73,11 +81,19 @@ pub enum Target {
 pub enum Msg {
     Snapshot(Box<Snapshot>),
     ActionDone(Result<String, String>),
-    Logs { title: String, lines: Result<Vec<String>, String> },
+    Logs {
+        title: String,
+        lines: Result<Vec<String>, String>,
+    },
     /// Now showing this cluster (fresh state follows).
-    Switched { cluster: String },
+    Switched {
+        cluster: String,
+    },
     SwitchFailed(String),
-    Probed { index: usize, result: Result<Probe, String> },
+    Probed {
+        index: usize,
+        result: Result<Probe, String>,
+    },
     Measured(Result<crate::storage::Measurements, String>),
 }
 
@@ -188,11 +204,8 @@ impl Source {
             Source::Kube { client, cluster, slow, .. } => {
                 let rollout_crd = slow.lock().unwrap().crds.rollout.clone();
                 let lp = ListParams::default();
-                let (node_api, pod_api, event_api) = (
-                    Api::<Node>::all(client.clone()),
-                    Api::<Pod>::all(client.clone()),
-                    Api::<Event>::all(client.clone()),
-                );
+                let (node_api, pod_api, event_api) =
+                    (Api::<Node>::all(client.clone()), Api::<Pod>::all(client.clone()), Api::<Event>::all(client.clone()));
                 let (dep_api, rs_api, ds_api, sts_api) = (
                     Api::<Deployment>::all(client.clone()),
                     Api::<ReplicaSet>::all(client.clone()),
@@ -211,7 +224,9 @@ impl Source {
                     cr_api.list(&lp),
                 )?;
                 let argo = match &rollout_crd {
-                    Some(ar) => Api::<kube::api::DynamicObject>::all_with(client.clone(), ar).list(&lp).await.map(|l| l.items).unwrap_or_default(),
+                    Some(ar) => {
+                        Api::<kube::api::DynamicObject>::all_with(client.clone(), ar).list(&lp).await.map(|l| l.items).unwrap_or_default()
+                    }
                     None => vec![],
                 };
                 let rollouts = ops::rollouts(&deps.items, &rss.items, &stss.items, &dss.items, &crs.items, &argo);
@@ -239,11 +254,7 @@ impl Source {
                     let image = first_image(st.spec.map(|s| s.template.spec));
                     workloads.push(workload(WorkloadKind::StatefulSet, st.metadata, desired, s.ready_replicas.unwrap_or(0), image));
                 }
-                let mut warnings: Vec<_> = events
-                    .items
-                    .into_iter()
-                    .filter(|e| e.type_.as_deref() == Some("Warning"))
-                    .collect();
+                let mut warnings: Vec<_> = events.items.into_iter().filter(|e| e.type_.as_deref() == Some("Warning")).collect();
                 warnings.sort_by_key(|e| std::cmp::Reverse(e.last_timestamp.as_ref().map(|t| t.0.to_string())));
                 let mut warnings: Vec<EventInfo> = warnings.into_iter().take(50).map(event_info).collect();
                 let slow = slow.lock().unwrap();
@@ -325,10 +336,7 @@ impl Source {
             Source::Demo(sim) => Ok(sim.logs(pod)),
             Source::Kube { client, .. } => {
                 let params = LogParams { tail_lines: Some(500), container, ..Default::default() };
-                let text = Api::<Pod>::namespaced(client.clone(), namespace)
-                    .logs(pod, &params)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let text = Api::<Pod>::namespaced(client.clone(), namespace).logs(pod, &params).await.map_err(|e| e.to_string())?;
                 Ok(text.lines().map(str::to_string).collect())
             }
         }
@@ -475,9 +483,8 @@ pub async fn run(
 /// inventories first, so self-managed clusters on cloud VMs without a cloud controller (no
 /// providerID) are still recognised as such.
 async fn probe(entry: &ClusterEntry, cfg: &CloudConfig, resolver: &Resolver) -> Result<Probe> {
-    let (version, nodes, hints) = tokio::time::timeout(Duration::from_secs(12), kubeconfigs::probe_raw(entry))
-        .await
-        .map_err(|_| anyhow::anyhow!("timed out"))??;
+    let (version, nodes, hints) =
+        tokio::time::timeout(Duration::from_secs(12), kubeconfigs::probe_raw(entry)).await.map_err(|_| anyhow::anyhow!("timed out"))??;
     let mut nodes: Vec<NodeInfo> = nodes.into_iter().map(node_info).collect();
     let (instances, _) = tokio::time::timeout(Duration::from_secs(15), cloud::inventory(cfg, &nodes)).await.unwrap_or_default();
     nodes.iter_mut().for_each(|n| resolver.apply(n, &instances));
@@ -488,16 +495,8 @@ fn node_info(node: Node) -> NodeInfo {
     let labels: BTreeMap<String, String> = node.metadata.labels.unwrap_or_default();
     let annotations = node.metadata.annotations.unwrap_or_default();
     let status = node.status.unwrap_or_default();
-    let ready = status
-        .conditions
-        .unwrap_or_default()
-        .iter()
-        .any(|c| c.type_ == "Ready" && c.status == "True");
-    let roles = labels
-        .keys()
-        .filter_map(|k| k.strip_prefix("node-role.kubernetes.io/"))
-        .map(str::to_string)
-        .collect();
+    let ready = status.conditions.unwrap_or_default().iter().any(|c| c.type_ == "Ready" && c.status == "True");
+    let roles = labels.keys().filter_map(|k| k.strip_prefix("node-role.kubernetes.io/")).map(str::to_string).collect();
     let capacity = status.capacity.unwrap_or_default();
     let alloc = status.allocatable.unwrap_or_default();
     let allocatable = Usage {
@@ -517,11 +516,7 @@ fn node_info(node: Node) -> NodeInfo {
         allocatable,
         os_image: status.node_info.as_ref().map(|i| i.os_image.clone()).unwrap_or_default(),
         kubelet: status.node_info.map(|i| i.kubelet_version).unwrap_or_default(),
-        internal_ip: addresses
-            .iter()
-            .find(|a| a.type_ == "InternalIP")
-            .map(|a| a.address.clone())
-            .unwrap_or_default(),
+        internal_ip: addresses.iter().find(|a| a.type_ == "InternalIP").map(|a| a.address.clone()).unwrap_or_default(),
         provider_id: node.spec.and_then(|s| s.provider_id).unwrap_or_default(),
         addresses: addresses.into_iter().map(|a| a.address).collect(),
         cloud: None,
@@ -574,11 +569,7 @@ fn event_info(e: Event) -> EventInfo {
     let o = e.involved_object;
     EventInfo {
         reason: e.reason.unwrap_or_default(),
-        object: format!(
-            "{}/{}",
-            o.kind.unwrap_or_default().to_lowercase(),
-            o.name.unwrap_or_default()
-        ),
+        object: format!("{}/{}", o.kind.unwrap_or_default().to_lowercase(), o.name.unwrap_or_default()),
         message: e.message.unwrap_or_default().replace('\n', " "),
         count: e.count.unwrap_or(1),
     }
@@ -587,10 +578,7 @@ fn event_info(e: Event) -> EventInfo {
 /// `7927612Ki` -> `7.6Gi`; anything unparseable is passed through.
 fn human_bytes(q: &str) -> String {
     let units = [("Ki", 1u64 << 10), ("Mi", 1 << 20), ("Gi", 1 << 30), ("Ti", 1 << 40)];
-    let (num, mult) = units
-        .iter()
-        .find_map(|(s, m)| q.strip_suffix(s).map(|n| (n, *m)))
-        .unwrap_or((q, 1));
+    let (num, mult) = units.iter().find_map(|(s, m)| q.strip_suffix(s).map(|n| (n, *m))).unwrap_or((q, 1));
     match num.parse::<f64>() {
         Ok(n) => format!("{:.1}Gi", n * mult as f64 / (1u64 << 30) as f64),
         Err(_) => q.to_string(),
@@ -598,18 +586,11 @@ fn human_bytes(q: &str) -> String {
 }
 
 fn controller(meta: &ObjectMeta) -> Option<(String, String)> {
-    meta.owner_references
-        .as_ref()?
-        .iter()
-        .find(|o| o.controller == Some(true))
-        .map(|o| (o.kind.clone(), o.name.clone()))
+    meta.owner_references.as_ref()?.iter().find(|o| o.controller == Some(true)).map(|o| (o.kind.clone(), o.name.clone()))
 }
 
 fn first_image(spec: Option<Option<PodSpec>>) -> String {
-    spec.flatten()
-        .and_then(|s| s.containers.into_iter().next())
-        .and_then(|c| c.image)
-        .unwrap_or_default()
+    spec.flatten().and_then(|s| s.containers.into_iter().next()).and_then(|c| c.image).unwrap_or_default()
 }
 
 fn workload(kind: WorkloadKind, meta: ObjectMeta, desired: i32, ready: i32, image: String) -> WorkloadInfo {

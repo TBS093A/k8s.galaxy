@@ -86,10 +86,8 @@ pub fn discover() -> Vec<ClusterEntry> {
         if kc.contexts.is_empty() {
             continue;
         }
-        let in_default_chain = std::env::var_os("KUBECONFIG").map_or_else(
-            || home_kube().is_some_and(|d| d.join("config") == file),
-            |list| std::env::split_paths(&list).any(|p| p == file),
-        );
+        let in_default_chain = std::env::var_os("KUBECONFIG")
+            .map_or_else(|| home_kube().is_some_and(|d| d.join("config") == file), |list| std::env::split_paths(&list).any(|p| p == file));
         if default.is_none()
             && in_default_chain
             && let Some(cur) = &kc.current_context
